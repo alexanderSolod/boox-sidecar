@@ -65,9 +65,10 @@ See [Android build and connection details](android/README.md). The Mac app is ad
 ## Tests and known limits
 
 ```sh
-node --test viewer/app.test.js
-python3 tests/smoke_host.py
+./scripts/test.sh
 ```
+
+Requires macOS 15+, Swift Command Line Tools, Node.js 22+, Python 3, and the Android build tools above. The command runs browser and Swift helper tests, native client checks, both builds, Android lint, and shell syntax checks. Use `--suite browser|mac|android` for one platform. Add `--gui` in an interactive macOS desktop session to run the synthetic host socket smoke tests; the default explicitly skips that suite. Physical-device acceptance is separate.
 
 See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), [protocol](docs/PROTOCOL.md), and [implementation plan](docs/PLAN.md) for precise completion status. Existing validation records describe historical releases; protocol 2 live capture and transport acceptance require hardware checks. Synthetic tests do not establish visible panel latency or battery life.
 
