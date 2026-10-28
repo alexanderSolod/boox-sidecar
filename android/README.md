@@ -21,13 +21,13 @@ The first build downloads the pinned Android Gradle Plugin 8.7.3 and dependencie
 
 ## Pairing
 
-Start the Mac host and use the repository's USB pairing helper. The Activity also accepts explicit provisioning extras:
+Start the Mac host and use the repository's USB pairing helper. The restricted `ProvisioningActivity` accepts explicit provisioning extras from callers holding `android.permission.DUMP` (including the ADB shell). The public launcher ignores pairing extras:
 
 - `host`: `http://127.0.0.1:8787` for USB or `https://MAC_IP:8788` for Wi-Fi.
 - `token`: the Mac's current 64-character hexadecimal session token.
 - `cert_sha256`: the Wi-Fi server certificate's SHA-256 fingerprint over its DER encoding (64 hex characters, optional colons).
 
-All three are validated before storing any changes. A Wi-Fi provisioning intent selects Wi-Fi; USB provisioning selects USB. Both endpoint configurations are retained. Token and pin are kept in private app SharedPreferences, with Android backup and device-transfer exclusions. Tokens are never written to native app logs. Pair again after the Mac host rotates its session token. Use **Controls → Connect / pair** to edit settings or explicitly switch transports. There is no automatic downgrade from Wi-Fi to USB. **Clear saved pairing** removes the stored credentials.
+Pairing values are validated before a durable update. Invalid provisioning leaves the previous pairing intact. Manual replacement requires confirmation. A Wi-Fi provisioning intent selects Wi-Fi; USB provisioning selects USB. Both endpoint configurations are retained. Token and pin are kept in private app SharedPreferences, with Android backup and device-transfer exclusions. Tokens are never written to native app logs. Pair again after the Mac host rotates its session token. Use **Controls → Connect / pair** to edit settings or explicitly switch transports. There is no automatic downgrade from Wi-Fi to USB. **Clear saved pairing** removes the stored credentials.
 
 For USB, authorize this computer on the tablet and run:
 

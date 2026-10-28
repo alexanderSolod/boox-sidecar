@@ -106,7 +106,6 @@ public final class MainActivity extends Activity {
         connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         powerManager = (PowerManager) getSystemService(POWER_SERVICE);
         maxWidth = Math.max(600, Math.min(2480, maxWidth));
-        acceptProvisioning(getIntent());
         buildUi();
         setFullscreen(true);
         Log.i("BooxSidecar", "Native receiver ready; full-refresh API " + (refresh.available() ? "available" : "unavailable"));
@@ -115,37 +114,9 @@ public final class MainActivity extends Activity {
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        setIntent(intent);
-        acceptProvisioning(intent);
+        setIntent(new Intent());
+        discoveredEndpoint = "";
         if (resumed) startSession();
-    }
-
-    private void acceptProvisioning(Intent intent) {
-        if (intent == null || !intent.hasExtra("host")) return;
-        try {
-            String endpoint = PinnedClient.validateEndpoint(intent.getStringExtra("host"));
-            String token = intent.getStringExtra("token");
-            String pin = PinnedClient.normalizePin(intent.getStringExtra("cert_sha256"));
-            String hostId = PinnedClient.normalizePin(intent.getStringExtra("host_id"));
-            if (hostId.isEmpty()) hostId = pin;
-            if (!hostId.matches("[0-9a-f]{64}") || (endpoint.startsWith("https:") && !hostId.equals(pin)))
-                throw new Exception("Provision the Mac's matching host identity and certificate pin.");
-            new PinnedClient(endpoint, token, pin);
-            SharedPreferences.Editor editor = preferences.edit();
-            if (!hostId.equals(savedHostId())) {
-                editor.remove("wifiHost").remove("wifiPin");
-                discoveredEndpoint = "";
-            }
-            editor.putString("token", token).putString("hostId", hostId).putString("usbHost", USB)
-                    .putString("connectionMode", "auto");
-            if (endpoint.startsWith("https:")) editor.putString("wifiHost", endpoint).putString("wifiPin", pin);
-            editor.apply();
-            intent.removeExtra("token");
-            intent.removeExtra("cert_sha256");
-            Log.i("BooxSidecar", "Pairing updated; automatic USB / pinned Wi-Fi enabled");
-        } catch (Exception exception) {
-            Toast.makeText(this, "Pairing rejected: " + exception.getMessage(), Toast.LENGTH_LONG).show();
-        }
     }
 
     private String savedHostId() {
@@ -281,20 +252,22 @@ public final class MainActivity extends Activity {
             try {
                 String endpoint = PinnedClient.validateEndpoint(host.getText().toString());
                 if (wifi.isChecked() != endpoint.startsWith("https:")) throw new Exception("Match the URL to your selected USB or Wi-Fi mode.");
-                String secret = token.getText().toString().trim();
-                String fingerprint = PinnedClient.normalizePin(pin.getText().toString());
-                new PinnedClient(endpoint, secret, fingerprint);
-                if (!fingerprint.matches("[0-9a-f]{64}")) throw new Exception("Enter the saved Mac's certificate fingerprint / host identity.");
-                SharedPreferences.Editor editor = preferences.edit();
-                if (!fingerprint.equals(savedHostId())) {
-                    editor.remove("wifiHost").remove("wifiPin");
-                    discoveredEndpoint = "";
-                }
-                editor.putString("token", secret).putString("hostId", fingerprint).putString("connectionMode", "auto").putString("usbHost", USB);
-                if (wifi.isChecked()) editor.putString("wifiHost", endpoint).putString("wifiPin", fingerprint);
-                editor.apply();
-                dialog.dismiss();
-                startSession();
+                PairingStore.Record record = PairingStore.validate(endpoint, token.getText().toString().trim(),
+                        pin.getText().toString(), pin.getText().toString());
+                new AlertDialog.Builder(this).setTitle("Replace saved pairing?")
+                        .setMessage("Trust these Mac pairing details and replace the saved connection?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Replace", (confirmation, which) -> {
+                            try {
+                                PairingStore.save(preferences, record);
+                                stopSession();
+                                discoveredEndpoint = "";
+                                dialog.dismiss();
+                                startSession();
+                            } catch (Exception exception) {
+                                host.setError("Could not save pairing. Try again.");
+                            }
+                        }).show();
             } catch (Exception exception) { host.setError(exception.getMessage()); }
         }));
         dialog.show();

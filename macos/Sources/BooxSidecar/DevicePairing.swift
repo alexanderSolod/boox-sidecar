@@ -72,7 +72,7 @@ enum DevicePairing {
         guard installed.contains("package:") else { throw failure("Install the BOOX Sidecar Android app before pairing.") }
         // BOOX app freezing can leave this exact installed package disabled.
         _ = try run(adb, ["-s", device.serial, "shell", "pm", "enable", "local.boox.sidecar"])
-        var args = ["-s", device.serial, "shell", "am", "start", "-n", "local.boox.sidecar/.MainActivity", "--es", "host", host, "--es", "usb_host", "http://127.0.0.1:\(port)", "--es", "token", token, "--ez", "auto_connect", "true"]
+        var args = ["-s", device.serial, "shell", "am", "start", "-n", "local.boox.sidecar/.ProvisioningActivity", "--es", "host", host, "--es", "usb_host", "http://127.0.0.1:\(port)", "--es", "token", token, "--ez", "auto_connect", "true"]
         if let fingerprint, !fingerprint.isEmpty { args += ["--es", "cert_sha256", fingerprint] }
         if let hostID, !hostID.isEmpty { args += ["--es", "host_id", hostID] }
         if preferUSB { args += ["--es", "preferred_transport", "usb"] }
