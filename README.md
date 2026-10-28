@@ -1,6 +1,6 @@
 # BOOX Sidecar
 
-An independent Mac-to-BOOX display app. Version 0.3 adds remembered pairing, one **Connect** action, automatic USB preference with pinned Wi-Fi fallback, and performance presets. It provides a native Android receiver and an independent Mac desktop. The browser viewer is an optional fallback.
+An independent Mac-to-BOOX display app. Version 0.3 adds remembered pairing, one **Connect** action, automatic USB preference with pinned Wi-Fi fallback, and performance presets. It provides a native Android receiver and an independent Mac desktop. The browser viewer is available only through an explicit development launch mode.
 
 ## Use the native app
 
@@ -80,7 +80,7 @@ See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE
 
 ## Browser fallback and troubleshooting
 
-`./scripts/connect-usb.sh` creates the USB tunnel and opens the native app if installed, otherwise the browser viewer. The browser uses `http://127.0.0.1:8787/` and manual session-token pairing. It cannot control BOOX hardware refresh modes.
+`./scripts/connect-usb.sh` creates the USB tunnel and opens the native app. For browser development, launch the Mac executable with `--development-browser`, then use `./scripts/connect-usb.sh --development-browser`. This mode uses loopback HTTP and a disposable token printed at launch or available through **Copy browser link**. It can capture a locally selected real display, but never loads native pairing credentials or enables native provisioning, Wi-Fi, or discovery. It is intentionally insecure development transport and cannot control BOOX hardware refresh modes. `--demo` continues to provide synthetic frames without capture or input. `--lan` is unsupported.
 
 Run `./scripts/doctor.sh` for basic diagnostics. If ADB reports unauthorized, accept the prompt on the BOOX. If no device appears, reconnect a data cable and keep the device unlocked. A repeated USB 'device not responding' error can require restarting the tablet before installation; that is independent of the display-streaming code.
 

@@ -34,7 +34,7 @@ struct HostView: View {
                         Text("Your Mac desktop, extended onto your BOOX").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(host.demo ? "DEMO" : host.capturing ? "SHARING" : "READY").font(.caption.bold()).padding(8).background(.quaternary, in: Capsule())
+                    Text(host.developmentBrowser ? "DEVELOPMENT HTTP" : host.demo ? "DEMO" : host.capturing ? "SHARING" : "READY").font(.caption.bold()).padding(8).background(.quaternary, in: Capsule())
                 }
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
@@ -90,22 +90,22 @@ struct HostView: View {
                             Button("Remove display") { host.removeExtendedDisplay() }.disabled(host.virtualDisplayID == 0 || host.creatingExtendedDisplay)
                         }
                         Text("The separate desktop uses experimental private macOS display APIs. You can also select an existing display above.").font(.caption).foregroundStyle(.secondary)
-                        Toggle("Enable encrypted Wi-Fi (port 8788)", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.enableWireless($0) }))
+                        Toggle("Enable encrypted Wi-Fi (port 8788)", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.enableWireless($0) })).disabled(host.browserEnabled)
                         if !host.wirelessMessage.isEmpty { Text(host.wirelessMessage).font(.caption).textSelection(.enabled) }
                         HStack {
-                            Button("Pair app for USB") { host.pairBOOX(useWiFi: false) }.disabled(host.pairingDevice)
-                            Button("Pair app for Wi-Fi") { host.pairBOOX(useWiFi: true) }.disabled(host.pairingDevice || !host.wirelessEnabled)
+                            Button("Pair app for USB") { host.pairBOOX(useWiFi: false) }.disabled(host.pairingDevice || host.browserEnabled)
+                            Button("Pair app for Wi-Fi") { host.pairBOOX(useWiFi: true) }.disabled(host.pairingDevice || host.browserEnabled || !host.wirelessEnabled)
                             Button("Copy certificate fingerprint") { host.copyFingerprint() }.disabled(host.fingerprint.isEmpty)
                         }
                         if let address = host.wirelessAddresses.first { Text("Wi-Fi address: \(address):8788").font(.caption).textSelection(.enabled) }
                         HStack {
-                            Button("Copy browser link") { host.copyLink() }
+                            if host.browserEnabled { Button("Copy browser link") { host.copyLink() } }
                             Button("Copy pairing token") { host.copyToken() }
                             Spacer()
                             Button("Forget pairing…", role: .destructive) { confirmForget = true }
                         }
                         Text("Manual USB: adb reverse tcp:\(String(host.port)) tcp:\(String(host.port))").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        if host.lan { Text("Legacy --lan exposes unencrypted HTTP. Prefer encrypted Wi-Fi.").font(.caption).foregroundStyle(.orange) }
+
                     }.padding(.top, 12)
                 }
             }.padding(24)

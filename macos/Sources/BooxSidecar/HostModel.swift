@@ -55,6 +55,8 @@ struct DisplayInfo: Identifiable {
     }
     let port: UInt16
     let lan: Bool
+    let developmentBrowser: Bool
+    var browserEnabled: Bool { demo || developmentBrowser }
     let demo: Bool
     private let server = HTTPServer()
     private let wirelessServer = HTTPServer()
@@ -67,9 +69,10 @@ struct DisplayInfo: Identifiable {
     init() {
         let args = CommandLine.arguments
         demo = args.contains("--demo")
-        lan = args.contains("--lan")
+        developmentBrowser = args.contains("--development-browser")
+        lan = false
         if let index = args.firstIndex(of: "--port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { port = value } else { port = 8787 }
-        if demo { credentialStore = nil }
+        if demo || developmentBrowser { credentialStore = nil }
         else {
             let directory: URL
             if let index = args.firstIndex(of: "--pairing-directory"), args.indices.contains(index + 1) { directory = URL(fileURLWithPath: args[index + 1], isDirectory: true) }
@@ -79,7 +82,11 @@ struct DisplayInfo: Identifiable {
         var credentialFailure: String?
         do { token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken() }
         catch { token = ""; credentialFailure = error.localizedDescription }
-        if !demo {
+        if args.contains("--lan") || (browserEnabled && args.contains("--wireless")) {
+            token = ""
+            credentialFailure = "--lan is unsupported. Development browser mode is loopback-only and cannot enable Wi-Fi."
+        }
+        if !browserEnabled {
             let prefs = UserDefaults.standard
             if let value = prefs.object(forKey: "capture.fps") as? Int, (1...60).contains(value) { fps = value }
             if let value = prefs.object(forKey: "capture.width") as? Int, (600...2480).contains(value) { maxWidth = value }
@@ -99,7 +106,11 @@ struct DisplayInfo: Identifiable {
             if demo { print("BOOX Sidecar DEMO viewer: \(viewerURL)"); fflush(stdout) }
         } catch { message = "Unable to start server: \(error.localizedDescription)" }
         if demo { startDemo() }
-        if !token.isEmpty, args.contains("--wireless") { enableWireless(true) }
+        if developmentBrowser {
+            connectionMessage = "Development browser: loopback HTTP with a disposable credential. Native pairing and Wi-Fi are disabled."
+            print("BOOX Sidecar DEVELOPMENT viewer: \(viewerURL)"); fflush(stdout)
+        }
+        if !browserEnabled, !token.isEmpty, args.contains("--wireless") { enableWireless(true) }
         if !token.isEmpty, args.contains("--extended"), !demo {
             Task { await createExtendedDisplay(requestPermission: false) }
         }
@@ -225,6 +236,7 @@ struct DisplayInfo: Identifiable {
     }
 
     func enableWireless(_ enabled: Bool) {
+        guard !browserEnabled else { return }
         if !enabled {
             wirelessGeneration += 1
             advertiser.stop()
@@ -275,6 +287,11 @@ struct DisplayInfo: Identifiable {
             connectionRequested = true
             if !capturing { startDemo() }
             connectionMessage = "Synthetic demo is ready. No BOOX pairing or screen capture is performed."
+            return
+        }
+        if developmentBrowser {
+            connectionRequested = true
+            start()
             return
         }
         connectionRequested = true
@@ -333,7 +350,7 @@ struct DisplayInfo: Identifiable {
     }
 
     private func checkUSB(explicit: Bool) async {
-        guard !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice else { return }
         pairingDevice = true
         defer { pairingDevice = false }
         let pairPort = port, pairToken = token, pin = fingerprint.isEmpty ? nil : fingerprint, identity = hostID
@@ -395,7 +412,7 @@ struct DisplayInfo: Identifiable {
     var wirelessAddresses: [String] { DevicePairing.addresses }
 
     func pairBOOX(useWiFi: Bool) {
-        guard !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice else { return }
         let host: String
         let certificate: String?
         if useWiFi {
@@ -482,7 +499,7 @@ struct DisplayInfo: Identifiable {
     }
 
     func applySettings() {
-        if !demo {
+        if !browserEnabled {
             let prefs = UserDefaults.standard
             prefs.set(fps, forKey: "capture.fps")
             prefs.set(maxWidth, forKey: "capture.width")
