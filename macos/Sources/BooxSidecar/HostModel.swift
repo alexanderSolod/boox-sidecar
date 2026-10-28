@@ -50,6 +50,7 @@ struct DisplayInfo: Identifiable {
     private(set) var hostID = ""
     private var tlsIdentity: TLSIdentity?
     private var tlsDirectory: URL?
+    private var tlsMaintenanceTimer: Timer?
     let wifiPort: UInt16
     let port: UInt16
     let lan: Bool
@@ -90,6 +91,7 @@ struct DisplayInfo: Identifiable {
                 let tls = try TLSIdentity.load(directory: tlsDirectory)
                 tlsIdentity = tls
                 fingerprint = tls.spkiPin
+                if let warning = tls.renewalError { wirelessMessage = warning }
             }
         }
         catch { token = ""; credentialFailure = error.localizedDescription }
@@ -112,10 +114,11 @@ struct DisplayInfo: Identifiable {
         server.onReady = { [weak self] in Task { @MainActor in self?.serverReady = true } }
         server.onError = { [weak self] text in Task { @MainActor in self?.message = "Server: \(text)"; self?.serverReady = false } }
         do {
-            if !token.isEmpty { try server.start(port: port, lan: false, tlsIdentity: tlsIdentity?.identity) }
+            if !token.isEmpty { try startLocalServer() }
             // CLI output is intentionally a local pairing credential; never transmitted to a third party.
             if demo { print("BOOX Sidecar DEMO viewer: \(viewerURL)"); fflush(stdout) }
         } catch { message = "Unable to start server: \(error.localizedDescription)" }
+        if !browserEnabled, tlsIdentity != nil { scheduleTLSMaintenance() }
         if demo { startDemo() }
         if developmentBrowser {
             connectionMessage = "Development browser: loopback HTTP with a disposable credential. Native pairing and Wi-Fi are disabled."
@@ -244,6 +247,55 @@ struct DisplayInfo: Identifiable {
         virtualDisplayID = 0
         refreshDisplays()
         message = "BOOX extended display removed."
+    }
+
+    private func startLocalServer() throws {
+        if browserEnabled {
+            try server.start(port: port, lan: false)
+        } else {
+            guard let identity = tlsIdentity, identity.valid(at: Date()) else {
+                throw NSError(domain: "BOOXSidecar.TLS", code: 1, userInfo: [NSLocalizedDescriptionKey: "A valid TLS identity is required for native USB."])
+            }
+            try server.start(port: port, lan: false, tlsIdentity: identity.identity)
+        }
+    }
+
+    private func scheduleTLSMaintenance() {
+        tlsMaintenanceTimer?.invalidate()
+        let remaining = tlsIdentity?.expiresAt.timeIntervalSinceNow ?? 60
+        let delay = max(1, min(24 * 60 * 60, remaining))
+        tlsMaintenanceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refreshTLSIdentity() }
+        }
+    }
+
+    private func refreshTLSIdentity() {
+        guard !browserEnabled else { return }
+        defer { scheduleTLSMaintenance() }
+        do {
+            let refreshed = try TLSIdentity.load(directory: tlsDirectory)
+            let changed = refreshed.fingerprint != tlsIdentity?.fingerprint
+            let restoreWiFi = wirelessEnabled || wirelessStarting
+            tlsIdentity = refreshed
+            fingerprint = refreshed.spkiPin
+            if changed || !serverReady {
+                server.stop()
+                serverReady = false
+                try startLocalServer()
+                if restoreWiFi { enableWireless(false); enableWireless(true) }
+            }
+            if let warning = refreshed.renewalError { wirelessMessage = warning }
+        } catch {
+            wirelessMessage = "TLS renewal failed: " + error.localizedDescription
+            if tlsIdentity?.valid(at: Date()) != true {
+                stop()
+                server.stop()
+                serverReady = false
+                enableWireless(false)
+                tlsIdentity = nil
+                message = "Secure connections stopped because the TLS identity expired. " + error.localizedDescription
+            }
+        }
     }
 
     func setWirelessPreference(_ enabled: Bool) {
@@ -406,7 +458,7 @@ struct DisplayInfo: Identifiable {
         do {
             token = try credentialStore?.rotate() ?? PairingCredentialStore.randomToken()
             if !serverReady {
-                try server.start(port: port, lan: false, tlsIdentity: tlsIdentity?.identity)
+                try startLocalServer()
             }
             connectionMessage = "Pairing forgotten. Connect the BOOX by USB and click Connect to pair again."
         } catch { connectionMessage = error.localizedDescription }
@@ -539,6 +591,9 @@ struct DisplayInfo: Identifiable {
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
+        if !browserEnabled && tlsIdentity?.valid(at: Date()) != true {
+            return .error("TLS identity expired; renew it on the Mac", status: 503)
+        }
         // Prevent DNS rebinding in default loopback mode.
         if request.loopback {
             let allowed = ["127.0.0.1:\(port)", "localhost:\(port)"]

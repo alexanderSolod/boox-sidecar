@@ -15,7 +15,7 @@ Installing a release build instead of compiling? See [docs/INSTALL.md](docs/INST
 
 Protocol 2 requires updating both apps and pairing once again over USB; legacy plaintext clients are unsupported. The migration creates a new `pairing-token-v2` credential. Later pairing survives normal Mac restarts. Local discovery can find a remembered Mac after its LAN address changes; it cannot pair an unknown Mac or bypass certificate verification. Both native transports require the saved public-key pin and valid TLS. If TLS is unavailable, native connections fail closed. Advanced controls retain manual pairing and USB/Wi-Fi preferences.
 
-The Mac stores its pairing credential and TLS identity privately under `~/Library/Application Support/BOOX Sidecar/`; no certificate is installed into system trust. **Forget pairing** stops sharing and replaces the saved credential, so old pairings must be provisioned again. Disconnect stops sharing while retaining pairing.
+The Mac stores its pairing credential and TLS identity privately under `~/Library/Application Support/BOOX Sidecar/`; no certificate is installed into system trust. **Forget pairing** stops sharing and replaces the saved credential, so old pairings must be provisioned again. Disconnect stops sharing while retaining pairing. Certificates renew with the same key when fewer than 30 days remain; the host checks at startup and daily. Renewal failures are shown locally, and an expired identity stops native connections until renewal succeeds.
 
 The Android app runs fullscreen and renders native bitmaps. Optional tap/scroll requires the Mac's separate input opt-in and Accessibility permission.
 
