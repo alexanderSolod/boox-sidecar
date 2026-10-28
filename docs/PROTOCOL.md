@@ -22,13 +22,13 @@ A dedicated Android `.ProvisioningActivity` requires `android.permission.DUMP`. 
 
 Both native transports and Auto probes check certificate validity, the pinned public key, and TLS key possession before sending application credentials. Redirects are rejected. The connection-scoped hostname verifier uses the provisioned key as identity and restricts requests to the configured endpoint; no global TLS bypass is installed. Authenticated status must report protocol 2 and the saved installation ID. USB-only provisioning retains trust for subsequent Wi-Fi discovery.
 
-The canonical TLS identity is published atomically as a private PKCS12 file, imported in memory. Certificate renewal retains the key; deliberate key replacement requires USB re-pairing. Neither a matching public host ID nor a discovery advertisement authorizes a key change.
+The canonical TLS identity is published atomically as a private PKCS12 file, imported in memory. Certificates renew with the same key when fewer than 30 days remain, checked at startup and daily. Renewal failures retain an otherwise valid identity and are reported locally; expired identities stop native connections. Deliberate key replacement requires USB re-pairing. Neither a matching public host ID nor a discovery advertisement authorizes a key change.
 
 Browser resources are available only with `--development-browser` or synthetic `--demo`. Development browser mode uses loopback HTTP and a disposable in-memory credential, can use locally approved real capture/input, and disables native provisioning and LAN listeners. Its insecure transport must not be used for normal native pairing. `--lan` is rejected. The browser removes a supplied `#token=...` fragment from its address bar and keeps the token in session storage.
 
 ## HTTP contract
 
-Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. The default HTTP listener validates loopback Host headers. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
+Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is public. Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. Loopback listeners validate Host headers, including native USB TLS. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
 
 | Endpoint | Response / behavior |
 | --- | --- |
@@ -50,7 +50,7 @@ grayscale: Bool
 displayID, virtualDisplayID: UInt32
 extendedDesktop, wirelessEnabled: Bool
 wirelessAddresses: [String]
-spki_sha256, host_id, message: String
+spki_sha256, host_id, capture_session, message: String
 displayAsleep: Bool
 ```
 
@@ -58,13 +58,13 @@ displayAsleep: Bool
 
 Settings accept `fps` (integer 1–60), `grayscale` (Boolean), `maxWidth` (integer 600–2480), `jpegQuality` (number 0.4–0.95). Display selection is restricted to the local Mac UI. Any remote payload containing `displayID` is rejected with HTTP 403 before applying other fields. Unknown keys and invalid types/ranges are rejected. Changing capture settings restarts an active stream. Capture start/stop and virtual-display creation/removal remain local Mac actions; there is no remote capture-start endpoint.
 
-JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, and `X-Frame-Height`. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has one network/decode worker, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
+JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, `X-Frame-Height`, and `X-Capture-Session`. Status reports `capture_session` (empty while stopped); input requests must include the matching `capture_session`. Session changes invalidate pending frames and input. Stop, source loss, capture permission errors, and Forget pairing revoke queued sends and cancel sensitive connections. Already transmitted bytes cannot be retracted. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has one network/decode worker, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
 
 Input payloads:
 
 ```json
-{"type":"tap","x":0.5,"y":0.5}
-{"type":"scroll","deltaY":300}
+{"type":"tap","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"scroll","deltaY":300,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
 ```
 
 Tap coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Scroll ranges from -1000 to 1000; positive means up. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.

@@ -2,7 +2,7 @@
 
 This is a dedicated Java Android app, not a browser or WebView. A custom Canvas view displays the Mac's latest JPEG while a single worker handles authenticated HTTP requests and bitmap decoding. USB uses `adb reverse`; both USB and Wi-Fi use HTTPS with a provisioned SHA-256 public-key/SPKI pin.
 
-The app targets API 35 and supports API 26+. The connected BOOX Note Air4 C reports Android 13. There are no third-party runtime libraries.
+The app targets API 35 and supports API 26+. Device-specific test results are recorded in [VALIDATION.md](../docs/VALIDATION.md). There are no third-party runtime libraries.
 
 ## Build and install
 
@@ -55,11 +55,11 @@ Official BOOX references: [EPD screen update API](https://github.com/onyx-intl/O
 
 The HTTPS client checks certificate validity dates and a constant-time SHA-256 match of the leaf certificate's SPKI. Its connection-scoped hostname verifier accepts the configured host only after verifying the paired key. USB, Wi-Fi, and Auto probes all use this policy. Redirects and plaintext endpoints are rejected. Renewing a certificate with the same key preserves trust; changing the key requires trusted re-pairing.
 
-There is one network/decode worker, one in-flight request, one displayed bitmap and at most one pending bitmap. New pending frames replace older pending frames. Input and settings are also bounded to their latest pending event. Responses are capped at 64 KiB for JSON and 12 MiB for JPEG, with dimension/decode limits. Connection/read timeouts are 2.5/3.5 seconds. Failures back off to 1.5-second retries. The receiver stops and cancels its connection when paused and starts a fresh session on resume. Session generations prevent stale frames from being displayed after reconnecting. The foreground Activity keeps the screen awake. If capture stops, Screen Recording permission is absent, or the connection fails, the app clears displayed/pending frames and suppresses input. Frames resume only after status reports capture and permission ready. Native diagnostics log the first actual Canvas draw dimensions once per session and received/requested FPS no more often than every five seconds; they contain no token or image content.
+There is one network/decode worker, one in-flight request, one displayed bitmap and at most one pending bitmap. New pending frames replace older pending frames. Input and settings are also bounded to their latest pending event. Responses are capped at 64 KiB for JSON and 12 MiB for JPEG, with dimension/decode limits. Connection/read timeouts are 2.5/3.5 seconds. Route-selection failures back off from 0.5 to 8 seconds. The receiver stops and cancels its connection when paused and starts a fresh session on resume. Connection generations and capture-session IDs prevent stale frames or input from crossing reconnects and capture restarts. The foreground Activity keeps the screen awake. If capture stops, Screen Recording permission is absent, or the connection fails, the app clears displayed/pending frames and suppresses input. Frames resume only after status reports capture and permission ready. Native diagnostics log the first actual Canvas draw dimensions once per session and received/requested FPS no more often than every five seconds; they contain no token or image content.
 
 ## Validation
 
-The native APK builds successfully with the project-local toolchain. Android lint completes with no errors; remaining warnings concern the intentional custom certificate-pin TrustManager, English UI strings and backwards-compatible Android attributes. The native JVM tests check endpoint restrictions, tokens, pin normalization, matching/mismatching certificate pins and certificate expiration (18 checks).
+Run `sh android/tests/run-native-client-tests.sh` from the repository root for native endpoint, token, pin, route, and capture-session regression checks. Run `sh android/build.sh :app:lintDebug` for the build and Android lint.
 
 The initial build alone does not verify physical e-ink response, networking on the tablet, or refresh-mode changes. Hardware acceptance checks are:
 

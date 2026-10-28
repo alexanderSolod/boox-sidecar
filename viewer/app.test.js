@@ -39,7 +39,7 @@ function browserHarness(intercept) {
   function element(id) {
     if (elements.has(id)) return elements.get(id);
     const node = { id, value: '', checked: false, hidden: false, disabled: false, events: {}, children: [], textContent: '', classList: { toggle() {} },
-      addEventListener(name, listener) { this.events[name] = listener; }, setAttribute() {}, removeAttribute() {},
+      addEventListener(name, listener) { this.events[name] = listener; }, setAttribute() {}, removeAttribute(name) { delete this[name]; },
       appendChild(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
       replaceWith(next) { elements.set(this.id, next); }, getBoundingClientRect() { return { left: 100, top: 0, width: 800, height: 600 }; }
     };
@@ -48,13 +48,13 @@ function browserHarness(intercept) {
   const document = { getElementById: element, createElement() { return {}; }, addEventListener() {} };
   const storage = new Map();
   const sessionStorage = { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) };
-  const status = { protocol: 2, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1 };
+  const status = { protocol: 2, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1, capture_session: 'session-1' };
   const window = { document, location: { hash: '', pathname: '/', search: '' }, addEventListener() {} };
   const fetch = async (path, options) => {
     calls.push({ path, options });
     if (intercept) { const response = await intercept(path, options, status); if (response !== undefined) return response; }
-    if (path.startsWith('/api/frame')) return { ok: true, status: 200, blob: async () => 'jpeg', headers: { get: () => '42' } };
-    return { ok: true, status: 200, json: async () => path === '/api/displays' ? { displays: [{ id: 1, name: 'Mac', width: 1400, height: 900 }] } : status };
+    if (path.startsWith('/api/frame')) return { ok: true, status: 200, blob: async () => 'jpeg', headers: { get: key => key === 'X-Frame-ID' ? '42' : key === 'X-Capture-Session' ? status.capture_session : null } };
+    return { ok: true, status: 200, json: async () => path === '/api/displays' ? { displays: [{ id: 1, name: 'Mac', width: 1400, height: 900 }] } : { ...status } };
   };
   function Image() { Object.assign(this, element('image-' + images.length)); images.push(this); }
   const context = { window, document, sessionStorage, history: { replaceState() {} }, URLSearchParams, Number, Date: { now: () => now }, AbortController, Image, fetch,
@@ -192,4 +192,110 @@ test('local source changes update the read-only display label', async () => {
   assert.equal(h.element('display').textContent, 'Display 2 · selected on Mac');
   h.element('disconnect').events.click();
   assert.equal(h.element('display').textContent, 'Waiting for Mac');
+});
+
+test('a capture session change clears the displayed frame and requires fresh input opt-in', async () => {
+  let switched = false;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status' && switched) status.capture_session = 'session-2';
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true;
+  h.element('control').events.change();
+  switched = true;
+  await h.tick();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('frame').src, undefined);
+  assert.ok(h.revoked.includes('blob:1'));
+  assert.equal(h.element('control').checked, false);
+  assert.equal(h.images.length, 2, 'a frame from the new capture may decode');
+  h.images[1].onload(); await h.flush();
+  assert.equal(h.element('frame'), h.images[1]);
+});
+
+test('frames from a different capture session never enter decoding', async () => {
+  const h = browserHarness(path => {
+    if (path.startsWith('/api/frame')) return {
+      ok: true, status: 200, blob: async () => 'old-jpeg',
+      headers: { get: key => key === 'X-Frame-ID' ? '42' : key === 'X-Capture-Session' ? 'obsolete-session' : null }
+    };
+  });
+  await h.connect();
+  assert.equal(h.images.length, 0);
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('control').disabled, true);
+  assert.equal(h.element('placeholder').hidden, false);
+});
+
+test('a session change cancels an in-progress decode and rejects its late callback', async () => {
+  let switched = false;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/settings' && switched) status.capture_session = 'session-2';
+  });
+  await h.connect();
+  const lateLoad = h.images[0].onload;
+  switched = true;
+  await h.element('fps').events.change({ target: { id: 'fps', value: '15' } });
+  lateLoad(); await h.flush();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.images[0].src, undefined);
+  assert.deepEqual(h.revoked, ['blob:1']);
+  assert.equal(h.element('connection').textContent, 'Connected · live', 'obsolete decoding is not a transport error');
+});
+
+test('input carries the capture session that authorized the displayed source', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true;
+  h.element('control').events.change();
+  h.element('scrollDown').events.click(); await h.flush();
+  const call = h.calls.find(call => call.path === '/api/input');
+  assert.deepEqual(JSON.parse(call.options.body), { type: 'scroll', deltaY: -300, capture_session: 'session-1' });
+});
+
+test('observed capture stop clears the last frame and disables input', async () => {
+  let stopped = false;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status' && stopped) { status.capturing = false; status.capture_session = ''; }
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true;
+  h.element('control').events.change();
+  stopped = true;
+  await h.tick();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('frame').src, undefined);
+  assert.ok(h.revoked.includes('blob:1'));
+  assert.equal(h.element('control').disabled, true);
+  const before = h.calls.length;
+  h.element('scrollDown').events.click(); await h.flush();
+  assert.equal(h.calls.length, before, 'stopped capture must not send input');
+});
+
+test('connection loss clears the displayed frame before retrying', async () => {
+  let failed = false;
+  const h = browserHarness(path => {
+    if (path === '/api/status' && failed) throw new Error('connection lost');
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  failed = true;
+  await h.tick();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('frame').src, undefined);
+  assert.ok(h.revoked.includes('blob:1'));
+  assert.equal(h.element('control').disabled, true);
+  assert.equal(h.element('connection').textContent, 'Connection interrupted');
+});
+
+test('permission loss clears frames and prevents input even if capture still reports active', async () => {
+  let denied = false;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status' && denied) status.permission = false;
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  denied = true;
+  await h.tick();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('control').disabled, true);
+  assert.ok(h.revoked.includes('blob:1'));
 });

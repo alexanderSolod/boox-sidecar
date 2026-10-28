@@ -84,6 +84,7 @@ public final class MainActivity extends Activity {
     private volatile PinnedClient client;
     private volatile boolean captureReady;
     private volatile boolean hostAsleep;
+    private final CaptureSessionState captureSession = new CaptureSessionState();
     private boolean remoteInputRequested;
     private boolean fullscreen = true;
     private long lastFrameID = -1;
@@ -351,19 +352,21 @@ public final class MainActivity extends Activity {
             throw new Exception("Mac identity mismatch. No connection was accepted.");
     }
 
-    private void activateRoute(int session, Pairing pairing, VerifiedRoute route) {
+    private synchronized void activateRoute(int session, Pairing pairing, VerifiedRoute route) {
         if (!isCurrent(session)) { route.client.cancel(); return; }
         PinnedClient old = client;
         client = route.client;
         routeEndpoint = route.endpoint;
         if (old != null && old != client) old.cancel();
         captureReady = false;
+        captureSession.update("", false);
         lastFrameID = -1;
         nextStatusAt = 0;
         measurementStart = SystemClock.elapsedRealtime();
         receivedFrames = 0;
         retryAttempt = 0;
         nextUsbProbeAt = measurementStart + 10000;
+        pendingInput.set(null);
         PendingFrame discard = pendingFrame.getAndSet(null);
         if (discard != null) discard.bitmap.recycle();
         if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
@@ -427,10 +430,14 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void stopSession() {
+    private synchronized void stopSession() {
         generation++;
         captureReady = false;
-        if (frameView != null) updateFrameInput();
+        captureSession.update("", false);
+        if (frameView != null) {
+            frameView.clearFrame();
+            updateFrameInput();
+        }
         PinnedClient previous = client;
         client = null;
         routeEndpoint = "";
@@ -469,7 +476,7 @@ public final class MainActivity extends Activity {
                 }
             }
             JSONObject input = pendingInput.getAndSet(null);
-            if (input != null && captureReady) {
+            if (input != null && captureReady && captureSession.accepts(input.optString("capture_session", ""))) {
                 try { connection.json("/api/input", input); }
                 catch (Exception exception) { postStatus(session, exception.getMessage(), true); }
             }
@@ -481,7 +488,8 @@ public final class MainActivity extends Activity {
                 boolean wasAsleep = hostAsleep;
                 hostAsleep = result.optBoolean("displayAsleep", false);
                 if (wasAsleep != hostAsleep) ui.post(this::updateScreenLock);
-                setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing") && !hostAsleep);
+                setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing") && !hostAsleep,
+                        result.optString("capture_session", ""));
                 if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
                 hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
                         : hostAsleep ? "Mac display asleep — resumes on wake"
@@ -502,6 +510,7 @@ public final class MainActivity extends Activity {
             PinnedClient.Response response = captureReady ? connection.frame(lastFrameID)
                     : new PinnedClient.Response(new byte[0], -1);
             if (response.bytes.length != 0 && isCurrent(session)) {
+                if (!captureSession.accepts(response.captureSession)) throw new Exception("Capture session changed. Reconnecting.");
                 BitmapFactory.Options bounds = new BitmapFactory.Options();
                 bounds.inJustDecodeBounds = true;
                 BitmapFactory.decodeByteArray(response.bytes, 0, response.bytes.length, bounds);
@@ -515,10 +524,10 @@ public final class MainActivity extends Activity {
                     decode.inSampleSize *= 2;
                 Bitmap bitmap = BitmapFactory.decodeByteArray(response.bytes, 0, response.bytes.length, decode);
                 if (bitmap == null) throw new Exception("The Mac sent an undecodable frame.");
-                if (!isCurrent(session)) { bitmap.recycle(); return; }
+                if (!isCurrent(session) || client != connection || !captureSession.accepts(response.captureSession)) { bitmap.recycle(); return; }
                 lastFrameID = response.frameID;
                 receivedFrames++;
-                PendingFrame replaced = pendingFrame.getAndSet(new PendingFrame(session, connection, bitmap));
+                PendingFrame replaced = pendingFrame.getAndSet(new PendingFrame(session, connection, response.captureSession, bitmap));
                 if (replaced != null) replaced.bitmap.recycle();
                 synchronized (this) {
                     if (!framePosted) {
@@ -530,7 +539,7 @@ public final class MainActivity extends Activity {
             delay = captureReady ? Math.max(1, 1000 / fps - (SystemClock.elapsedRealtime() - started)) : (hostAsleep ? 3000 : 500);
         } catch (Exception exception) {
             if (!isCurrent(session)) return;
-            setCaptureState(session, false);
+            setCaptureState(session, false, "");
             connection.cancel();
             client = null;
             routeEndpoint = "";
@@ -543,18 +552,19 @@ public final class MainActivity extends Activity {
 
     private boolean isCurrent(int session) { return resumed && generation == session; }
 
-    private void displayPendingFrame() {
-        synchronized (this) { framePosted = false; }
+    private synchronized void displayPendingFrame() {
+        framePosted = false;
         PendingFrame frame = pendingFrame.getAndSet(null);
         if (frame == null) return;
-        if (!isCurrent(frame.session) || !captureReady || frame.owner != client) frame.bitmap.recycle();
-        else frameView.setFrame(frame.bitmap, frame.session);
+        if (!isCurrent(frame.session) || !captureReady || frame.owner != client || !captureSession.accepts(frame.captureSession)) frame.bitmap.recycle();
+        else frameView.setFrame(frame.bitmap, frame.session, frame.captureSession);
     }
 
-    private void setCaptureState(int session, boolean ready) {
+    private synchronized void setCaptureState(int session, boolean ready, String reportedSession) {
         if (!isCurrent(session)) return;
-        captureReady = ready;
-        if (!ready) {
+        boolean changed = captureSession.update(reportedSession, ready);
+        captureReady = ready && !captureSession.id().isEmpty();
+        if (!captureReady || changed) {
             lastFrameID = -1;
             pendingInput.set(null);
             PendingFrame discarded = pendingFrame.getAndSet(null);
@@ -562,17 +572,15 @@ public final class MainActivity extends Activity {
         }
         ui.post(() -> {
             if (!isCurrent(session)) return;
-            // While the Mac display sleeps, freeze the last frame instead of
-            // clearing to white; the panel keeps it with zero refreshes.
-            if (!captureReady && !hostAsleep) frameView.clearFrame();
+            if ((changed || !captureReady) && !hostAsleep) frameView.clearFrame();
             updateFrameInput();
         });
     }
 
     private void updateFrameInput() {
         frameView.setInput(remoteInputRequested && captureReady, new FrameView.InputListener() {
-            @Override public void tap(double x, double y) { queueInput("tap", x, y); }
-            @Override public void scroll(double delta) { queueInput("scroll", delta, 0); }
+            @Override public void tap(String authority, double x, double y) { queueInput(authority, "tap", x, y); }
+            @Override public void scroll(String authority, double delta) { queueInput(authority, "scroll", delta, 0); }
         });
     }
 
@@ -606,10 +614,10 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void queueInput(String type, double first, double second) {
-        if (!captureReady || !resumed) return;
+    private void queueInput(String authority, String type, double first, double second) {
+        if (!captureReady || !resumed || !captureSession.accepts(authority)) return;
         try {
-            JSONObject event = new JSONObject().put("type", type);
+            JSONObject event = new JSONObject().put("type", type).put("capture_session", authority);
             if ("tap".equals(type)) event.put("x", first).put("y", second);
             else event.put("deltaY", first);
             pendingInput.set(event);
@@ -859,6 +867,9 @@ public final class MainActivity extends Activity {
         final int session;
         final Bitmap bitmap;
         final PinnedClient owner;
-        PendingFrame(int session, PinnedClient owner, Bitmap bitmap) { this.session = session; this.owner = owner; this.bitmap = bitmap; }
+        final String captureSession;
+        PendingFrame(int session, PinnedClient owner, String captureSession, Bitmap bitmap) {
+            this.session = session; this.owner = owner; this.captureSession = captureSession; this.bitmap = bitmap;
+        }
     }
 }

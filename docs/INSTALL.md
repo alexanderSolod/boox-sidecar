@@ -1,10 +1,12 @@
-# Install and launch — release builds
+# Install and launch — v0.3.0 release
 
-Copy-pasteable steps for users and coding agents. Release assets:
+These steps describe the v0.3.0 release assets using protocol 1. Current source builds use protocol 2, require macOS 15+, and require updating both apps and pairing again over USB. The plaintext status command below applies only to the older release. See [README.md](../README.md) for current-source behavior.
+
+Release assets:
 
 | Asset | Contents |
 | --- | --- |
-| `BOOX-Sidecar-v0.3.0-macOS.zip` | Ad-hoc-signed Mac host app (macOS 15+) |
+| `BOOX-Sidecar-v0.3.0-macOS.zip` | Ad-hoc-signed Mac host app (macOS 14+; encrypted Wi-Fi needs macOS 15+) |
 | `BOOX-Sidecar-v0.3.0.apk` | Debug-signed Android receiver (Android 8+; built for BOOX e-ink tablets) |
 
 Verify downloads against `SHA256SUMS.txt` in the same release:
@@ -66,7 +68,7 @@ unfreeze **BOOX Sidecar** in BOOX app management.
 
 First-time pairing needs USB attached; afterwards Wi-Fi alone is enough.
 
-## Verify it works (agent checklist)
+## Verify the v0.3.0 release
 
 ```sh
 TOKEN=$(cat "$HOME/Library/Application Support/BOOX Sidecar/pairing-token")

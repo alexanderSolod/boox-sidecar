@@ -1,6 +1,6 @@
 # BOOX Sidecar
 
-An independent Mac-to-BOOX display app. Version 0.3 adds remembered pairing, one **Connect** action, automatic USB preference with pinned Wi-Fi fallback, and performance presets. It provides a native Android receiver and an independent Mac desktop. The browser viewer is available only through an explicit development launch mode.
+An independent Mac-to-BOOX display app with remembered pairing, one **Connect** action, automatic USB preference with pinned Wi-Fi fallback, and performance presets. Current source builds use protocol 2; the documented v0.3.0 release assets use protocol 1. It provides a native Android receiver and an independent Mac desktop. The browser viewer is available only through an explicit development launch mode.
 
 ## Use the native app
 
@@ -17,7 +17,7 @@ Protocol 2 requires updating both apps and pairing once again over USB; legacy p
 
 The Mac stores its pairing credential and TLS identity privately under `~/Library/Application Support/BOOX Sidecar/`; no certificate is installed into system trust. **Forget pairing** stops sharing and replaces the saved credential, so old pairings must be provisioned again. Disconnect stops sharing while retaining pairing. Certificates renew with the same key when fewer than 30 days remain; the host checks at startup and daily. Renewal failures are shown locally, and an expired identity stops native connections until renewal succeeds.
 
-The Android app runs fullscreen and renders native bitmaps. Optional tap/scroll requires the Mac's separate input opt-in and Accessibility permission.
+The Android app runs fullscreen and renders native bitmaps. Display selection is local to the Mac. Optional tap/scroll requires the Mac's separate input opt-in, Accessibility permission, and the current capture session.
 
 ## Resolution and refresh rate
 
@@ -69,16 +69,16 @@ node --test viewer/app.test.js
 python3 tests/smoke_host.py
 ```
 
-See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), [protocol](docs/PROTOCOL.md), and [implementation plan](docs/PLAN.md) for precise completion status. The v0.3 implementation and software checks are being validated; physical v0.3 installation/reconnect acceptance is tracked separately. Synthetic tests do not establish visible panel latency or battery life.
+See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), [protocol](docs/PROTOCOL.md), and [implementation plan](docs/PLAN.md) for precise completion status. Existing validation records describe historical releases; protocol 2 live capture and transport acceptance require hardware checks. Synthetic tests do not establish visible panel latency or battery life.
 
 - Native virtual-display creation uses undocumented CoreGraphics interfaces isolated in an Objective-C target. It is experimental and may break with a macOS update. References/licenses are in [THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md).
 - Portrait desktop presets, pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
 - Wi-Fi requires a route between tablet and Mac; guest/client-isolated networks can prevent it.
 - The host keeps one latest JPEG and clients bound their work. Static screens may produce fewer frames than the requested rate.
 - The normal USB TLS listener binds only to loopback on 8787. Wi-Fi uses a separate TLS listener on 8788. Both use SHA-256 public-key/SPKI pinning and bearer authentication. No cloud relay, external viewer assets, telemetry, or system-wide TLS bypass.
-- Changing or deleting the Mac TLS identity or forgetting pairing requires pairing the Android app again. Stop capture or quit the host to end sharing.
+- Replacing the Mac TLS key, resetting its installation identity, or forgetting pairing requires pairing the Android app again. Stop capture or quit the host to end sharing.
 
-## Browser fallback and troubleshooting
+## Development browser and troubleshooting
 
 `./scripts/connect-usb.sh` creates the USB tunnel and opens the native app. For browser development, launch the Mac executable with `--development-browser`, then use `./scripts/connect-usb.sh --development-browser`. This mode uses loopback HTTP and a disposable token printed at launch or available through **Copy browser link**. It can capture a locally selected real display, but never loads native pairing credentials or enables native provisioning, Wi-Fi, or discovery. It is intentionally insecure development transport and cannot control BOOX hardware refresh modes. `--demo` continues to provide synthetic frames without capture or input. `--lan` is unsupported.
 

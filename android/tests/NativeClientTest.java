@@ -49,6 +49,7 @@ public final class NativeClientTest {
         expectFailure(() -> verify(old, expired));
         check(PinnedClient.normalizePin("AB:CD EF").equals("abcdef"));
         routePolicyChecks(validPin);
+        captureSessionChecks();
         verifierReuseChecks(matched, valid);
         matched.cancel();
         expectFailure(() -> matched.frame(0));
@@ -75,6 +76,21 @@ public final class NativeClientTest {
         check(!AutoRoutePolicy.shouldProbeUsb("wifi", newWifi, usb, 20000, 10000));
         check(!AutoRoutePolicy.shouldProbeUsb("auto", usb, usb, 20000, 10000));
     }
+    static void captureSessionChecks() {
+        CaptureSessionState authority = new CaptureSessionState();
+        check(!authority.accepts(""));
+        check(authority.update("first-session", true));
+        check(authority.accepts("first-session"));
+        check(!authority.update("first-session", true));
+        check(authority.update("second-session", true));
+        check(!authority.accepts("first-session"));
+        check(authority.accepts("second-session"));
+        check(authority.update("second-session", false));
+        check(!authority.accepts("second-session"));
+        check(!authority.update("", true));
+        check(!authority.accepts(""));
+        check(!CaptureSessionState.valid("bad\r\nheader"));
+    }
     static void verifierReuseChecks(PinnedClient client, X509Certificate valid) throws Exception {
         java.util.ArrayList<FakeHttps> opened = new java.util.ArrayList<>();
         URL.setURLStreamHandlerFactory(protocol -> "https".equals(protocol) ? new URLStreamHandler() {
@@ -84,7 +100,7 @@ public final class NativeClientTest {
                 return connection;
             }
         } : null);
-        client.frame(0);
+        check("test-session".equals(client.frame(0).captureSession));
         client.frame(1);
         check(opened.size() == 2);
         HostnameVerifier first = opened.get(0).getHostnameVerifier();
@@ -98,8 +114,14 @@ public final class NativeClientTest {
                 });
         check(first.verify("192.168.1.2", session));
         check(!first.verify("attacker.invalid", session));
+        FakeHttps.captureSessionHeader = null;
+        expectFailure(() -> client.frame(2));
+        FakeHttps.captureSessionHeader = "bad\r\nheader";
+        expectFailure(() -> client.frame(2));
+        FakeHttps.captureSessionHeader = "test-session";
     }
     static final class FakeHttps extends HttpsURLConnection {
+        static String captureSessionHeader = "test-session";
         FakeHttps(URL url) { super(url); }
         @Override public void connect() { }
         @Override public void disconnect() { }
@@ -108,7 +130,7 @@ public final class NativeClientTest {
         @Override public java.security.cert.Certificate[] getLocalCertificates() { return null; }
         @Override public java.security.cert.Certificate[] getServerCertificates() { return null; }
         @Override public int getResponseCode() { return 200; }
-        @Override public String getHeaderField(String key) { return "X-Frame-ID".equals(key) ? "1" : null; }
+        @Override public String getHeaderField(String key) { return "X-Frame-ID".equals(key) ? "1" : "X-Capture-Session".equals(key) ? captureSessionHeader : null; }
         @Override public String getContentType() { return "image/jpeg"; }
         @Override public int getContentLength() { return 3; }
         @Override public InputStream getInputStream() { return new ByteArrayInputStream(new byte[]{1, 2, 3}); }

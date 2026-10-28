@@ -143,7 +143,9 @@ final class PinnedClient {
             long id = -1;
             String header = connection.getHeaderField("X-Frame-ID");
             if (header != null) { try { id = Long.parseLong(header); } catch (NumberFormatException ignored) { } }
-            if (path.startsWith("/api/frame") && (id < 0 || !"image/jpeg".equalsIgnoreCase(connection.getContentType())))
+            String captureSession = connection.getHeaderField("X-Capture-Session");
+            if (path.startsWith("/api/frame") && (id < 0 || !CaptureSessionState.valid(captureSession)
+                    || !"image/jpeg".equalsIgnoreCase(connection.getContentType())))
                 throw new IOException("Mac returned an invalid image response.");
             int declaredLength = connection.getContentLength();
             if (declaredLength > limit) throw new IOException("Mac response exceeds the size limit.");
@@ -158,7 +160,7 @@ final class PinnedClient {
                 }
             }
             reusable = true;
-            return new Response(output.toByteArray(), id);
+            return new Response(output.toByteArray(), id, captureSession);
         } finally {
             active = null;
             // Fully consumed/closed responses return their socket to Android's keepalive pool.
@@ -176,6 +178,10 @@ final class PinnedClient {
     static final class Response {
         final byte[] bytes;
         final long frameID;
-        Response(byte[] bytes, long frameID) { this.bytes = bytes; this.frameID = frameID; }
+        final String captureSession;
+        Response(byte[] bytes, long frameID) { this(bytes, frameID, ""); }
+        Response(byte[] bytes, long frameID, String captureSession) {
+            this.bytes = bytes; this.frameID = frameID; this.captureSession = captureSession == null ? "" : captureSession;
+        }
     }
 }

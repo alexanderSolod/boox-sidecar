@@ -2,7 +2,6 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 import VirtualDisplayKit
-import CryptoKit
 
 struct DisplayInfo: Identifiable {
     let id: CGDirectDisplayID
@@ -33,7 +32,7 @@ struct DisplayInfo: Identifiable {
     @Published var fingerprint = ""
     @Published var wirelessMessage = ""
     let virtualDisplay = BXVirtualDisplayController()
-    @Published private(set) var token: String
+    @Published private(set) var token: String = ""
     @Published var connecting = false
     @Published var connectionRequested = false
     @Published var connectionMessage = "Open the BOOX app, then click Connect. First-time pairing needs USB."
@@ -51,9 +50,9 @@ struct DisplayInfo: Identifiable {
     private var tlsIdentity: TLSIdentity?
     private var tlsDirectory: URL?
     private var tlsMaintenanceTimer: Timer?
+    private var configurationError: String?
     let wifiPort: UInt16
     let port: UInt16
-    let lan: Bool
     let developmentBrowser: Bool
     var browserEnabled: Bool { demo || developmentBrowser }
     let demo: Bool
@@ -62,6 +61,8 @@ struct DisplayInfo: Identifiable {
     private var capture: ScreenCapture?
     private var captureDisplayID: CGDirectDisplayID?
     private var generation = 0
+    private let sharingAuthority = SharingAuthority()
+    private var captureSession = ""
     private var frame: CapturedFrame?
     private var demoTimer: Timer?
     var viewerURL: String { "http://127.0.0.1:\(port)/#token=\(token)" }
@@ -70,7 +71,6 @@ struct DisplayInfo: Identifiable {
         let args = CommandLine.arguments
         demo = args.contains("--demo")
         developmentBrowser = args.contains("--development-browser")
-        lan = false
         if let index = args.firstIndex(of: "--port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { port = value } else { port = 8787 }
         if let index = args.firstIndex(of: "--wifi-port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { wifiPort = value } else { wifiPort = 8788 }
         if demo || developmentBrowser { credentialStore = nil }
@@ -80,9 +80,22 @@ struct DisplayInfo: Identifiable {
             else { directory = PairingCredentialStore.applicationDirectory }
             credentialStore = PairingCredentialStore(directory: directory)
         }
+        for option in ["--port", "--wifi-port"] {
+            let positions = args.indices.filter { args[$0] == option }
+            if positions.count > 1 { configurationError = "Specify \(option) only once." }
+            if let index = positions.first,
+               !args.indices.contains(index + 1) || UInt16(args[index + 1]).map({ $0 > 0 }) != true {
+                configurationError = "\(option) requires a port from 1 through 65535."
+            }
+        }
+        if !browserEnabled && port == wifiPort { configurationError = "USB and Wi-Fi require different listener ports." }
+        if args.contains("--lan") || (browserEnabled && args.contains("--wireless")) {
+            configurationError = "--lan is unsupported. Development browser mode is loopback-only and cannot enable Wi-Fi."
+        }
         var credentialFailure: String?
         token = ""
         do {
+            if let configurationError { throw NSError(domain: "BOOXSidecar.Configuration", code: 1, userInfo: [NSLocalizedDescriptionKey: configurationError]) }
             token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken()
             hostID = try credentialStore.map { try HostIdentityStore(directory: $0.directory).loadOrCreate() } ?? PairingCredentialStore.randomToken()
             if !browserEnabled {
@@ -96,10 +109,6 @@ struct DisplayInfo: Identifiable {
             }
         }
         catch { token = ""; credentialFailure = error.localizedDescription }
-        if args.contains("--lan") || (browserEnabled && args.contains("--wireless")) {
-            token = ""
-            credentialFailure = "--lan is unsupported. Development browser mode is loopback-only and cannot enable Wi-Fi."
-        }
         if !browserEnabled {
             let prefs = UserDefaults.standard
             if let value = prefs.object(forKey: "capture.fps") as? Int, (1...60).contains(value) { fps = value }
@@ -251,6 +260,7 @@ struct DisplayInfo: Identifiable {
     }
 
     private func startLocalServer() throws {
+        if let configurationError { throw NSError(domain: "BOOXSidecar.Configuration", code: 1, userInfo: [NSLocalizedDescriptionKey: configurationError]) }
         if browserEnabled {
             try server.start(port: port, lan: false)
         } else {
@@ -271,7 +281,7 @@ struct DisplayInfo: Identifiable {
     }
 
     private func refreshTLSIdentity() {
-        guard !browserEnabled else { return }
+        guard !browserEnabled, configurationError == nil else { return }
         defer { scheduleTLSMaintenance() }
         do {
             let refreshed = try TLSIdentity.load(directory: tlsDirectory)
@@ -300,13 +310,13 @@ struct DisplayInfo: Identifiable {
     }
 
     func setWirelessPreference(_ enabled: Bool) {
-        guard !browserEnabled else { return }
+        guard !browserEnabled, configurationError == nil else { return }
         UserDefaults.standard.set(enabled, forKey: "wireless.enabled")
         enableWireless(enabled)
     }
 
     func enableWireless(_ enabled: Bool) {
-        guard !browserEnabled else { return }
+        guard !browserEnabled, configurationError == nil else { return }
         if !enabled {
             wirelessGeneration += 1
             advertiser.stop()
@@ -364,7 +374,7 @@ struct DisplayInfo: Identifiable {
         connecting = true
         connectionMessage = "Preparing your BOOX desktop…"
         connectionTask?.cancel()
-        connectionTask = Task {
+        connectionTask = Task { [self] in
             defer { connecting = false }
             for _ in 0..<30 {
                 if serverReady { break }
@@ -455,6 +465,7 @@ struct DisplayInfo: Identifiable {
     }
 
     func forgetPairing() {
+        guard configurationError == nil else { return }
         disconnect()
         do {
             token = try credentialStore?.rotate() ?? PairingCredentialStore.randomToken()
@@ -512,6 +523,8 @@ struct DisplayInfo: Identifiable {
         // SCShareableContent/SCStream calls enforce consent and can present the
         // system permission prompt; a stale CGPreflight result must not block it.
         generation += 1
+        sharingAuthority.invalidate()
+        captureSession = UUID().uuidString
         let currentGeneration = generation
         let session = ScreenCapture()
         capture = session
@@ -543,10 +556,7 @@ struct DisplayInfo: Identifiable {
                 message = "Sharing the selected display. Keep private content off that display."
             } catch {
                 guard generation == currentGeneration else { return }
-                starting = false
-                capturing = false
-                capture = nil
-                captureDisplayID = nil
+                stop()
                 permission = CGPreflightScreenCaptureAccess()
                 let failure = error as NSError
                 message = "ScreenCaptureKit failed (\(failure.domain), \(failure.code)): \(error.localizedDescription)"
@@ -555,6 +565,10 @@ struct DisplayInfo: Identifiable {
     }
 
     func stop() {
+        sharingAuthority.invalidate()
+        captureSession = ""
+        server.cancelSensitiveConnections()
+        wirelessServer.cancelSensitiveConnections()
         generation += 1
         demoTimer?.invalidate()
         demoTimer = nil
@@ -591,10 +605,18 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 2, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
+        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
+        var response = respond(to: request)
+        if request.path.hasPrefix("/api/") {
+            response.authority = sharingAuthority.ticket(expiresAt: browserEnabled ? nil : tlsIdentity?.expiresAt)
+        }
+        return response
+    }
+
+    private func respond(to request: HTTPRequest) -> HTTPResponse {
         if !browserEnabled && tlsIdentity?.valid(at: Date()) != true {
             return .error("TLS identity expired; renew it on the Mac", status: 503)
         }
@@ -604,7 +626,7 @@ struct DisplayInfo: Identifiable {
             guard let host = request.headers["host"], allowed.contains(host.lowercased()) else { return .error("Invalid Host", status: 403) }
         }
         if request.path.hasPrefix("/api/") {
-            guard request.headers["authorization"] == "Bearer \(token)" else { return .error("Pairing token required", status: 401) }
+            guard SharingAuthority.matchesCredential(header: request.headers["authorization"], token: token) else { return .error("Pairing token required", status: 401) }
         }
         if request.method != "GET" {
             if let origin = request.headers["origin"] {
@@ -621,9 +643,13 @@ struct DisplayInfo: Identifiable {
         case "/api/status": return .json(status())
         case "/api/displays": return .json(["displays": displays.map(\.json)])
         case "/api/frame":
+            if capturing && !demo && captureDisplayID.map({ CGDisplayIsActive($0) != 0 }) != true {
+                stop()
+                return HTTPResponse(status: 204)
+            }
             guard let after = Int(request.query["after"] ?? "-1"), after >= -1 else { return .error("Invalid frame ID", status: 400) }
-            guard let frame, frameID > after else { return HTTPResponse(status: 204) }
-            return HTTPResponse(type: "image/jpeg", headers: ["X-Frame-ID": String(frameID), "X-Frame-Width": String(frame.width), "X-Frame-Height": String(frame.height)], body: frame.jpeg)
+            guard capturing, !captureSession.isEmpty, let frame, frameID > after else { return HTTPResponse(status: 204) }
+            return HTTPResponse(type: "image/jpeg", headers: ["X-Capture-Session": captureSession, "X-Frame-ID": String(frameID), "X-Frame-Width": String(frame.width), "X-Frame-Height": String(frame.height)], body: frame.jpeg)
         case "/api/settings", "/api/input":
             guard request.headers["content-type"]?.lowercased().hasPrefix("application/json") == true,
                   let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else { return .error("Expected JSON object", status: 400) }
@@ -674,7 +700,10 @@ struct DisplayInfo: Identifiable {
     }
 
     private func input(_ object: [String: Any]) -> HTTPResponse {
-        guard let captureDisplayID, displays.contains(where: { $0.id == captureDisplayID }), inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
+        guard !captureSession.isEmpty, object["capture_session"] as? String == captureSession else {
+            return .error("Input belongs to an inactive capture session", status: 403)
+        }
+        guard let captureDisplayID, CGDisplayIsActive(captureDisplayID) != 0, inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
         guard let type = object["type"] as? String else { return .error("Input type required", status: 400) }
         if type == "tap" {
             guard let x = number(object["x"]), let y = number(object["y"]), (0...1).contains(x), (0...1).contains(y) else { return .error("Coordinates must be from 0 to 1", status: 400) }
@@ -695,6 +724,8 @@ struct DisplayInfo: Identifiable {
     }
 
     private func startDemo() {
+        sharingAuthority.invalidate()
+        captureSession = UUID().uuidString
         capturing = true
         starting = false
         message = "DEMO: synthetic test image. Your screen is not being captured."
