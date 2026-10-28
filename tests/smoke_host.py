@@ -131,7 +131,7 @@ class HostSmoke(unittest.TestCase):
 
     def test_settings_validation_and_update(self):
         for body in ({'fps': 0}, {'fps': 61}, {'fps': True}, {'fps': 1.5},
-                     {'maxWidth': 3000}, {'grayscale': 1}, {'displayID': -1}, {'unknown': 1},
+                     {'maxWidth': 3000}, {'grayscale': 1}, {'unknown': 1},
                      {'jpegQuality': 0.39}, {'jpegQuality': 0.96}, {'jpegQuality': True}):
             self.assertEqual(self.request('/api/settings', 'POST', body)[0], 400, body)
         code, _, body = self.request('/api/settings', 'POST', {'fps': 3, 'maxWidth': 930, 'grayscale': False, 'jpegQuality': 0.6})
@@ -140,6 +140,20 @@ class HostSmoke(unittest.TestCase):
         self.assertFalse(json.loads(body)['grayscale'])
         self.assertEqual(json.loads(body)['jpegQuality'], 0.6)
         self.assertEqual(self.request('/api/settings', 'POST', {'fps': 60, 'maxWidth': 1240, 'grayscale': False})[0], 200)
+
+    def test_remote_display_selection_is_rejected_atomically(self):
+        code, _, body = self.request('/api/status')
+        self.assertEqual(code, 200)
+        before = json.loads(body)
+        fields = ('displayID', 'capturing', 'fps', 'maxWidth', 'grayscale', 'jpegQuality')
+        changed_fps = 3 if before['fps'] != 3 else 15
+        for display in (before['displayID'], -1, None, '1'):
+            code, _, _ = self.request('/api/settings', 'POST', {'displayID': display, 'fps': changed_fps})
+            self.assertEqual(code, 403)
+            code, _, body = self.request('/api/status')
+            self.assertEqual(code, 200)
+            after = json.loads(body)
+            self.assertEqual({key: before[key] for key in fields}, {key: after[key] for key in fields})
 
     def test_input_requires_local_consent(self):
         self.assertEqual(self.request('/api/input', 'POST', {'type': 'tap', 'x': 0.5, 'y': 0.5})[0], 403)

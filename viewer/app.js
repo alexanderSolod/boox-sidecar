@@ -20,7 +20,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var active = false, generation = 0, session = null, token = '', status = null;
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
-  var initialized = false, desiredSettings = null;
+  var initialized = false, desiredSettings = null, knownDisplays = [];
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
@@ -35,7 +35,6 @@
     $('reload').disabled = !active;
     $('disconnect').disabled = !active;
     $('connect').disabled = active;
-    $('display').disabled = !active || !initialized || pendingSettings;
     ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).disabled = pendingSettings || (active && !initialized); });
     $('frameInfo').textContent = (status && frameID >= 0 ? status.width + ' × ' + status.height + ' · ' : '') + (control ? 'Control enabled' : 'Viewing only');
   }
@@ -56,7 +55,8 @@
       }
       select.value = width;
     }
-    if (next.displayID != null) $('display').value = String(next.displayID);
+    var source = knownDisplays.find(function (display) { return display.id === next.displayID; });
+    $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (next.displayID != null ? 'Display ' + next.displayID + ' · selected on Mac' : 'Waiting for Mac');
     $('connection').textContent = next.capturing && next.permission ? 'Connected · live' : 'Connected · waiting';
     $('guidance').textContent = statusMessage(next);
     notice(statusMessage(next));
@@ -69,6 +69,8 @@
     frame.hidden = true; frame.removeAttribute('src'); $('placeholder').hidden = false;
     if (currentURL) URL.revokeObjectURL(currentURL);
     currentURL = null;
+    $('display').textContent = 'Waiting for Mac';
+    knownDisplays = [];
     $('connection').textContent = 'Not connected';
     $('guidance').textContent = 'Connect above to start viewing a display.';
     if (clearToken) { token = ''; $('token').value = ''; try { sessionStorage.removeItem('booxToken'); } catch (_) {} }
@@ -141,8 +143,7 @@
     var configured = await request('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(desiredSettings) }, run);
     if (run !== generation) return;
     validateProtocol(configured);
-    $('display').replaceChildren();
-    displays.displays.forEach(function (display) { var option = document.createElement('option'); option.value = display.id; option.textContent = display.name + ' · ' + display.width + ' × ' + display.height; $('display').appendChild(option); });
+    knownDisplays = displays.displays;
     initialized = true; failures = 0; lastStatusAt = Date.now(); applyStatus(configured);
     panel('pairPanel', 'pairButton', false);
   }
@@ -195,10 +196,10 @@
   async function settings(event) {
     if (!active || !initialized || pendingSettings) return;
     var key = event.target.id;
+    if (!['fps', 'grayscale', 'maxWidth'].includes(key)) return;
     var value = key === 'grayscale' ? event.target.checked : Number(event.target.value);
-    var payload = {}; payload[key === 'display' ? 'displayID' : key] = value;
+    var payload = {}; payload[key] = value;
     var run = generation; pendingSettings = true; frameRevision += 1; frameID = -1;
-    if (key === 'display') { frame.hidden = true; $('placeholder').hidden = false; $('guidance').textContent = 'Switching display…'; }
     updateControls();
     try {
       var next = await request('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run);
@@ -217,7 +218,7 @@
   $('disconnect').addEventListener('click', function () { stop(true); panel('pairPanel', 'pairButton', true); notice('Disconnected. Paste a session token to reconnect.'); });
   $('pairButton').addEventListener('click', function () { panel('pairPanel', 'pairButton', $('pairPanel').hidden); });
   $('settingsButton').addEventListener('click', function () { panel('settingsPanel', 'settingsButton', $('settingsPanel').hidden); });
-  ['fps', 'grayscale', 'maxWidth', 'display'].forEach(function (id) { $(id).addEventListener('change', settings); });
+  ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).addEventListener('change', settings); });
   $('control').addEventListener('change', updateControls);
   $('scrollUp').addEventListener('click', function () { input({ type: 'scroll', deltaY: 300 }); });
   $('scrollDown').addEventListener('click', function () { input({ type: 'scroll', deltaY: -300 }); });

@@ -105,7 +105,7 @@ test('a decoded current frame renders and API token stays out of URLs', async ()
   assert.equal(h.element('control').checked, false, 'host input opt-in alone must not enable viewer control');
 });
 
-test('a failed initial connection retries full setup, including display choices', async () => {
+test('a failed initial connection retries setup and shows the locally selected display', async () => {
   let first = true;
   const h = browserHarness(path => {
     if (path === '/api/status' && first) { first = false; throw new Error('USB not yet ready'); }
@@ -115,8 +115,8 @@ test('a failed initial connection retries full setup, including display choices'
   assert.equal(h.calls.filter(c => c.path === '/api/displays').length, 0);
   await h.tick();
   assert.equal(h.calls.filter(c => c.path === '/api/displays').length, 1);
-  assert.equal(h.element('display').children.length, 1);
-  assert.equal(h.element('display').disabled, false);
+  assert.equal(h.element('display').textContent, 'Mac · 1400 × 900');
+  assert.equal(h.element('display').events.change, undefined);
   assert.equal(h.element('maxWidth').value, '1240');
   assert.equal(h.element('pairPanel').hidden, true);
   assert.equal(h.images.length, 1);
@@ -163,4 +163,33 @@ test('connection requests full color at 60 FPS by default', async () => {
   assert.deepEqual(JSON.parse(settings.options.body), { fps: 60, maxWidth: 1240, grayscale: false });
   assert.equal(h.element('fps').value, '60');
   assert.equal(h.element('grayscale').checked, false);
+});
+
+
+test('display selection is read-only and never sent in remote settings', async () => {
+  const h = browserHarness();
+  await h.connect();
+  assert.equal(h.element('display').textContent, 'Mac · 1400 × 900');
+  assert.equal(h.element('display').events.change, undefined);
+  const count = h.calls.length;
+  await h.element('fps').events.change({ target: { id: 'display', value: '2' } });
+  assert.equal(h.calls.length, count, 'unsupported settings events must not send requests');
+  await h.element('fps').events.change({ target: { id: 'fps', value: '15' } });
+  assert.ok(h.calls.filter(call => call.path === '/api/settings').every(call => !Object.hasOwn(JSON.parse(call.options.body), 'displayID')));
+  const html = fs.readFileSync(require.resolve('./index.html'), 'utf8');
+  assert.match(html, /<output id="display">/);
+  assert.doesNotMatch(html, /<select[^>]+id="display"/);
+});
+
+test('local source changes update the read-only display label', async () => {
+  let changed = false;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status' && changed) status.displayID = 2;
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  changed = true;
+  await h.tick();
+  assert.equal(h.element('display').textContent, 'Display 2 · selected on Mac');
+  h.element('disconnect').events.click();
+  assert.equal(h.element('display').textContent, 'Waiting for Mac');
 });

@@ -60,6 +60,7 @@ struct DisplayInfo: Identifiable {
     private let server = HTTPServer()
     private let wirelessServer = HTTPServer()
     private var capture: ScreenCapture?
+    private var captureDisplayID: CGDirectDisplayID?
     private var generation = 0
     private var frame: CapturedFrame?
     private var demoTimer: Timer?
@@ -531,6 +532,7 @@ struct DisplayInfo: Identifiable {
             }
         }
         let id = displayID, rate = fps, width = maxWidth, gray = grayscale, quality = jpegQuality
+        captureDisplayID = id
         Task {
             do {
                 try await session.start(displayID: id, fps: rate, maxWidth: width, grayscale: gray, jpegQuality: quality)
@@ -544,6 +546,7 @@ struct DisplayInfo: Identifiable {
                 starting = false
                 capturing = false
                 capture = nil
+                captureDisplayID = nil
                 permission = CGPreflightScreenCaptureAccess()
                 let failure = error as NSError
                 message = "ScreenCaptureKit failed (\(failure.domain), \(failure.code)): \(error.localizedDescription)"
@@ -557,6 +560,7 @@ struct DisplayInfo: Identifiable {
         demoTimer = nil
         let oldCapture = capture
         capture = nil
+        captureDisplayID = nil
         starting = false
         capturing = false
         frame = nil
@@ -643,8 +647,9 @@ struct DisplayInfo: Identifiable {
     }
 
     private func settings(_ object: [String: Any]) -> HTTPResponse {
-        guard Set(object.keys).isSubset(of: ["fps", "grayscale", "maxWidth", "displayID", "jpegQuality"]) else { return .error("Unknown setting", status: 400) }
-        var newFPS = fps, newWidth = maxWidth, newGray = grayscale, newID = displayID
+        guard object["displayID"] == nil else { return .error("Select the shared display locally on the Mac", status: 403) }
+        guard Set(object.keys).isSubset(of: ["fps", "grayscale", "maxWidth", "jpegQuality"]) else { return .error("Unknown setting", status: 400) }
+        var newFPS = fps, newWidth = maxWidth, newGray = grayscale
         var newQuality = jpegQuality
         if let raw = object["fps"] {
             guard let value = number(raw), (1...60).contains(value), value.rounded() == value else { return .error("fps must be an integer from 1 to 60", status: 400) }
@@ -662,30 +667,25 @@ struct DisplayInfo: Identifiable {
             guard let value = raw as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return .error("grayscale must be boolean", status: 400) }
             newGray = value.boolValue
         }
-        if let raw = object["displayID"] {
-            guard let value = number(raw), value >= 0, value <= Double(UInt32.max), value.rounded() == value,
-                  displays.contains(where: { $0.id == UInt32(value) }) else { return .error("Unknown display", status: 400) }
-            newID = UInt32(value)
-        }
-        let changed = jpegQuality != newQuality || fps != newFPS || maxWidth != newWidth || grayscale != newGray || displayID != newID
-        jpegQuality = newQuality; fps = newFPS; maxWidth = newWidth; grayscale = newGray; displayID = newID
+        let changed = jpegQuality != newQuality || fps != newFPS || maxWidth != newWidth || grayscale != newGray
+        jpegQuality = newQuality; fps = newFPS; maxWidth = newWidth; grayscale = newGray
         if changed { applySettings() }
         return .json(status())
     }
 
     private func input(_ object: [String: Any]) -> HTTPResponse {
-        guard inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
+        guard let captureDisplayID, displays.contains(where: { $0.id == captureDisplayID }), inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
         guard let type = object["type"] as? String else { return .error("Input type required", status: 400) }
         if type == "tap" {
             guard let x = number(object["x"]), let y = number(object["y"]), (0...1).contains(x), (0...1).contains(y) else { return .error("Coordinates must be from 0 to 1", status: 400) }
-            let bounds = CGDisplayBounds(displayID)
+            let bounds = CGDisplayBounds(captureDisplayID)
             let point = CGPoint(x: bounds.minX + x * max(0, bounds.width - 1), y: bounds.minY + y * max(0, bounds.height - 1))
             CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
             CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
             CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         } else if type == "scroll" {
             guard let delta = number(object["deltaY"]), (-1000...1000).contains(delta) else { return .error("deltaY must be from -1000 to 1000", status: 400) }
-            let bounds = CGDisplayBounds(displayID)
+            let bounds = CGDisplayBounds(captureDisplayID)
             if let cursor = CGEvent(source: nil)?.location, !bounds.contains(cursor) {
                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: bounds.midX, y: bounds.midY), mouseButton: .left)?.post(tap: .cghidEventTap)
             }
