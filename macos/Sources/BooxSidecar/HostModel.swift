@@ -44,7 +44,8 @@ struct DisplayInfo: Identifiable {
     private let advertiser = BonjourAdvertiser()
     private var connectionTask: Task<Void, Never>?
     private var usbWatcher: Task<Void, Never>?
-    private var seenUSBDevices = Set<String>()
+    private var usbProvisioning = USBProvisioningState()
+    private var connectionGeneration = 0
     private var wirelessGeneration = 0
     private(set) var hostID = ""
     private var tlsIdentity: TLSIdentity?
@@ -372,10 +373,14 @@ struct DisplayInfo: Identifiable {
         }
         connectionRequested = true
         connecting = true
+        connectionGeneration += 1
+        let attempt = connectionGeneration
         connectionMessage = "Preparing your BOOX desktop…"
         connectionTask?.cancel()
+        usbWatcher?.cancel()
+        usbWatcher = nil
         connectionTask = Task { [self] in
-            defer { connecting = false }
+            defer { if connectionGeneration == attempt { connecting = false } }
             for _ in 0..<30 {
                 if serverReady { break }
                 if Task.isCancelled { return }
@@ -415,9 +420,10 @@ struct DisplayInfo: Identifiable {
 
     func disconnect() {
         connectionRequested = false
+        connectionGeneration += 1
         connectionTask?.cancel(); connectionTask = nil
         usbWatcher?.cancel(); usbWatcher = nil
-        seenUSBDevices.removeAll()
+        usbProvisioning = USBProvisioningState()
         connecting = false
         stop()
         enableWireless(false)
@@ -429,37 +435,48 @@ struct DisplayInfo: Identifiable {
         guard !browserEnabled, !pairingDevice else { return }
         pairingDevice = true
         defer { pairingDevice = false }
+        let attempt = connectionGeneration
         let pairPort = port, pairToken = token, pin = fingerprint.isEmpty ? nil : fingerprint, identity = hostID
         let address = wirelessAddresses.first
         let pairHost = wirelessEnabled && address != nil ? "https://\(address!):\(wifiPort)" : "https://127.0.0.1:\(port)"
-        let oldDevices = seenUSBDevices
+        let previousState = usbProvisioning
         do {
-            let worker = Task.detached(priority: .utility) { () throws -> (Set<String>, Int, String?) in
+            let worker = Task.detached(priority: .utility) { () throws -> (USBProvisioningState, Int, String?) in
                 let devices = try DevicePairing.discover()
+                var state = previousState
+                state.updateDiscovered(Set(devices.map(\.serial)))
                 var provisioned = 0
                 var pairingError: String?
                 for device in devices {
                     try Task.checkCancellation()
+                    let shouldProvision = state.shouldProvision(device.serial, now: ProcessInfo.processInfo.systemUptime, explicit: explicit)
                     do {
                         try DevicePairing.ensureReverse(device: device, port: pairPort)
-                        if explicit || !oldDevices.contains(device.serial) {
+                        if shouldProvision {
                             try Task.checkCancellation()
                             try DevicePairing.provision(device: device, port: pairPort, host: pairHost, token: pairToken, fingerprint: pin, hostID: identity)
+                            try Task.checkCancellation()
+                            state.succeeded(device.serial)
                             provisioned += 1
                         }
                     } catch is CancellationError { throw CancellationError() }
-                    catch { if explicit || !oldDevices.contains(device.serial) { pairingError = error.localizedDescription } }
+                    catch {
+                        if shouldProvision {
+                            state.failed(device.serial, now: ProcessInfo.processInfo.systemUptime)
+                            pairingError = error.localizedDescription
+                        }
+                    }
                 }
-                return (Set(devices.map(\.serial)), provisioned, pairingError)
+                return (state, provisioned, pairingError)
             }
             let result = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
-            guard connectionRequested, !Task.isCancelled else { return }
-            seenUSBDevices = result.0
+            guard connectionRequested, connectionGeneration == attempt, !Task.isCancelled else { return }
+            usbProvisioning = result.0
             if let error = result.2 { connectionMessage = "Desktop ready. " + error }
             else if result.1 > 0 { connectionMessage = "BOOX app paired for USB and Wi-Fi. Your desktop is ready; confirm the app displays it." }
             else if explicit { connectionMessage = wirelessEnabled ? "Desktop ready. Open the remembered BOOX app to reconnect over Wi-Fi, or plug in USB to pair." : "Desktop ready for USB. " + wirelessMessage }
         } catch {
-            guard connectionRequested, !Task.isCancelled else { return }
+            guard connectionRequested, connectionGeneration == attempt, !Task.isCancelled else { return }
             if explicit { connectionMessage = (wirelessEnabled ? "Desktop ready for remembered Wi-Fi. " : "") + error.localizedDescription }
         }
     }

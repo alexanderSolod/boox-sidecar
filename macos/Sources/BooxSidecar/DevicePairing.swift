@@ -105,6 +105,7 @@ enum DevicePairing {
     }
 
     @discardableResult private static func run(_ executable: String, _ arguments: [String]) throws -> String {
+        try Task.checkCancellation()
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -117,6 +118,7 @@ enum DevicePairing {
         // expose this text: am's success output includes the pairing intent.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        try Task.checkCancellation()
         let output = String(data: data, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0, !outputIndicatesFailure(output) else { throw failure("USB setup failed. Unlock the BOOX, approve USB debugging, and make sure BOOX Sidecar is installed and unfrozen.") }
         return output
