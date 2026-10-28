@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>BOOX Sidecar</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="toolbar">
+    <div class="brand"><strong>BOOX Sidecar</strong><span id="connection" role="status" aria-live="polite">Not connected</span></div>
+    <div class="actions"><button id="pairButton" aria-expanded="true" aria-controls="pairPanel">Connection</button><button id="settingsButton" aria-expanded="false" aria-controls="settingsPanel">View settings</button><button id="fullscreen">Fullscreen</button></div>
+  </header>
+  <section id="pairPanel" class="panel" aria-label="Connect to your Mac">
+    <div><h1>Your Mac, on paper.</h1><p>Connect your BOOX by USB, enable USB debugging, and run the USB connection script on your Mac. Open the host app and choose <strong>Start capture</strong>.</p><p>Paste the session token shown on your Mac. The token stays in this browser session.</p></div>
+    <form id="pairForm"><label for="token">Session token</label><input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste token from your Mac" required><div class="actions"><button type="submit" id="connect">Connect</button><button type="button" id="disconnect" disabled>Disconnect</button></div></form>
+  </section>
+  <section id="settingsPanel" class="panel settings" aria-label="View settings" hidden>
+    <label>Display<select id="display" disabled><option value="">Waiting for Mac</option></select></label>
+    <label>Requested frames per second<select id="fps"><option value="1">1 · reading</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="12">12</option><option value="15">15</option><option value="24">24</option><option value="30">30</option><option value="45">45</option><option value="60" selected>60 · maximum</option></select></label>
+    <label>Image width<select id="maxWidth"><option value="900">900 px · lighter</option><option value="1240" selected>1240 px · balanced</option><option value="1860">1860 px · detailed</option><option value="2480">2480 px · maximum</option></select></label>
+    <label class="check"><input type="checkbox" id="grayscale">Grayscale</label>
+    <p class="hint">Color is enabled by default. Requested FPS controls how often frames are captured and fetched; it is not the BOOX panel’s physical refresh rate. Actual delivery depends on capture, USB, and decoding. Choose the panel refresh mode on your BOOX.</p>
+  </section>
+  <main id="viewport" aria-label="Mac display">
+    <div id="placeholder"><span class="screenMark" aria-hidden="true">▱</span><h2>Ready when your Mac is.</h2><p id="guidance">Connect above to start viewing a display.</p></div>
+    <img id="frame" alt="Live view of the selected Mac display" draggable="false" hidden>
+  </main>
+  <footer class="toolbar footer">
+    <div class="actions"><button id="fit" aria-pressed="true">Fit screen</button><button id="reload" disabled>Reload frame</button><label class="check"><input type="checkbox" id="control" disabled>Tap to control</label><button id="scrollUp" disabled aria-label="Scroll up on Mac">↑ Scroll</button><button id="scrollDown" disabled aria-label="Scroll down on Mac">↓ Scroll</button></div>
+    <span id="frameInfo">Viewing only</span>
+  </footer>
+  <p id="notice" class="notice" role="status" aria-live="polite">USB connection · Screen Recording permission is required on your Mac.</p>
+</body>
+</html>

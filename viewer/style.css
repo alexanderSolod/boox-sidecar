@@ -1,0 +1,38 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #171717; background: #f4f3ef; font-size: 16px; color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+button, select, input[type="password"] { min-height: 44px; border: 1px solid #777; border-radius: 5px; background: #fff; padding: 9px 13px; }
+button { cursor: pointer; white-space: nowrap; }
+button:active, button[aria-pressed="true"] { background: #222; color: #fff; }
+button:disabled, input:disabled, select:disabled { color: #666; background: #e6e6e3; cursor: default; }
+:focus-visible { outline: 3px solid #111; outline-offset: 3px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 20px; background: #fff; border-bottom: 1px solid #888; }
+.brand { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.brand strong { font-size: 20px; letter-spacing: -.5px; }
+.brand span, #frameInfo { font-size: 14px; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.panel { padding: 20px; background: #f4f3ef; border-bottom: 1px solid #888; display: grid; grid-template-columns: minmax(200px, 1fr) minmax(250px, 1fr); gap: 24px; }
+h1 { margin: 0 0 10px; font-size: 26px; font-weight: 600; letter-spacing: -.6px; }
+p { margin: 8px 0; line-height: 1.5; }
+form { align-self: center; display: grid; gap: 10px; }
+form input { width: 100%; }
+label { font-size: 14px; display: flex; flex-direction: column; gap: 7px; }
+.check { flex-direction: row; align-items: center; min-height: 44px; gap: 8px; }
+input[type="checkbox"] { width: 21px; height: 21px; accent-color: #111; }
+.settings { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 20px; }
+.hint { font-size: 14px; flex-basis: 100%; margin: 0; }
+#viewport { flex: 1; min-height: 180px; position: relative; display: flex; align-items: center; justify-content: center; overflow: auto; background: #d9d9d6; }
+#frame { flex: none; display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; user-select: none; -webkit-user-select: none; }
+#viewport.actual { display: block; }
+#viewport.actual #frame { max-width: none; max-height: none; margin: auto; }
+#viewport.controlling #frame { cursor: crosshair; }
+#placeholder { padding: 28px; text-align: center; max-width: 540px; }
+#placeholder h2 { font-size: 23px; margin: 10px 0; font-weight: 500; }
+.screenMark { font-size: 64px; line-height: 1; }
+.footer { border-top: 1px solid #888; border-bottom: 0; padding-top: 10px; padding-bottom: 10px; }
+.notice { margin: 0; padding: 8px 20px 12px; background: #fff; font-size: 13px; border-top: 1px solid #ddd; }
+.notice.error { font-weight: 600; }
+@media (max-width: 680px) { .toolbar { padding: 10px 12px; gap: 10px; } .panel { grid-template-columns: 1fr; gap: 14px; padding: 16px; } .brand { justify-content: space-between; width: 100%; } .notice { padding: 8px 12px; } .settings label { flex: 1 1 140px; } }
+@media (max-height: 650px) and (min-width: 681px) { .panel { padding: 12px 20px; } .panel p { font-size: 14px; } h1 { font-size: 21px; } .toolbar { padding-top: 8px; padding-bottom: 8px; } }

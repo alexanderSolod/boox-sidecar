@@ -1,0 +1,85 @@
+# BOOX Sidecar
+
+An independent Mac-to-BOOX display app. Version 0.3 adds remembered pairing, one **Connect** action, automatic USB preference with pinned Wi-Fi fallback, and performance presets. It provides a native Android receiver and an independent Mac desktop. The browser viewer is an optional fallback.
+
+## Use the native app
+
+Installing a release build instead of compiling? See [docs/INSTALL.md](docs/INSTALL.md) for copy-pasteable Mac/Android steps, verification checks and uninstall notes — written for humans and coding agents.
+
+1. Open `dist/BOOX Sidecar.app` on the Mac and grant Screen Recording when requested.
+2. On first setup, connect the BOOX by USB, enable USB debugging and authorize this Mac.
+3. Install the Android app: `./scripts/install-native.sh`.
+4. Click **Connect** on the Mac. It creates the BOOX desktop, starts capture, enables encrypted Wi-Fi when available, establishes the USB tunnel and provisions the installed native app.
+5. Move windows across the Mac screen's right edge onto the BOOX desktop. Its logical size is 1240 × 930, backed by a 2480 × 1860 HiDPI display.
+6. Later, open both apps and click **Connect**. The Android app remembers this Mac. **Auto** prefers USB, falls back to the saved pinned Wi-Fi route, and returns to USB when available. Wi-Fi needs both devices on a reachable network; USB works without Wi-Fi.
+
+Pairing survives normal Mac restarts. Local discovery can find a remembered Mac after its LAN address changes; it cannot pair an unknown Mac or bypass certificate verification. If TLS is unavailable, Connect still provisions USB with a stable host identity. Enabling TLS later may require USB provisioning again. Advanced controls retain manual pairing and USB/Wi-Fi preferences.
+
+The Mac stores its pairing credential and TLS identity privately under `~/Library/Application Support/BOOX Sidecar/`; no certificate is installed into system trust. **Forget pairing** stops sharing and replaces the saved credential, so old pairings must be provisioned again. Disconnect stops sharing while retaining pairing.
+
+The Android app runs fullscreen and renders native bitmaps. Optional tap/scroll requires the Mac's separate input opt-in and Accessibility permission.
+
+## Resolution and refresh rate
+
+The Note Air4 C has **2480 × 1860 monochrome** resolution and **1240 × 930 color** resolution. [BOOX specifications](https://shop.boox.com/collections/all/products/noteair4c).
+
+| Preset | Stream width | Color | Requested FPS | JPEG quality |
+| --- | ---: | --- | ---: | ---: |
+| Speed | 1240 | Color | 60 | 0.60 |
+| Balanced / Balanced color | 1240 | Color | 60 | 0.78 |
+| Sharp text | 2480 | Grayscale | 60 | 0.88 |
+
+Use Speed for motion, Balanced for general color use, and Sharp text for fine text. Doubling both dimensions processes four times as many pixels. Presets are starting points; actual performance depends on content, encoding, transport and tablet decoding.
+
+**60 requested FPS is not 60 visible E Ink updates per second.** A v0.2 synthetic USB test on this BOOX measured about 49–51 received frames/s at 1240 pixels wide on 2026-10-28; that excludes physical panel refresh and does not establish v0.3 performance. Static desktops may produce no new frames. BOOX documents a quality/speed tradeoff but does not give a guaranteed numerical panel refresh rate in its [refresh guide](https://booxsupport.zendesk.com/hc/en-us/articles/8569262708372-Refresh-Modes).
+
+The Android **Faster panel…** button explicitly offers X mode, with reduced detail and more ghosting. It never changes the waveform merely because a stream preset was selected. Optional Normal, Regal, A2 and X modes use the firmware's public app-scoped API with delayed readback; unsupported firmware uses manual E Ink Center instructions. The app does not bypass Android's blocked hidden APIs.
+
+## Build
+
+Mac: macOS 14+ and Swift Command Line Tools. Encrypted Wi-Fi requires macOS 15+ because private-key import stays in process memory instead of modifying the Keychain.
+
+```sh
+./scripts/build-mac.sh
+open 'dist/BOOX Sidecar.app'
+```
+
+For automatic setup on launch:
+
+```sh
+open 'dist/BOOX Sidecar.app' --args --extended --wireless
+```
+
+Android: the project-local bootstrap downloads checksum-verified official JDK17, Gradle8.9, Android Platform35 and Build Tools35 archives. It does not change global Java or Android settings.
+
+```sh
+python3 scripts/bootstrap-android.py
+sh android/build.sh
+./scripts/install-native.sh
+```
+
+See [Android build and connection details](android/README.md). The Mac app is ad-hoc signed and the APK is debug-signed for local development; these are not notarized/production-store releases.
+
+## Tests and known limits
+
+```sh
+node --test viewer/app.test.js
+python3 tests/smoke_host.py
+```
+
+See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), [protocol](docs/PROTOCOL.md), and [implementation plan](docs/PLAN.md) for precise completion status. The v0.3 implementation and software checks are being validated; physical v0.3 installation/reconnect acceptance is tracked separately. Synthetic tests do not establish visible panel latency or battery life.
+
+- Native virtual-display creation uses undocumented CoreGraphics interfaces isolated in an Objective-C target. It is experimental and may break with a macOS update. References/licenses are in [THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md).
+- Portrait desktop presets, pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
+- Wi-Fi requires a route between tablet and Mac; guest/client-isolated networks can prevent it.
+- The host keeps one latest JPEG and clients bound their work. Static screens may produce fewer frames than the requested rate.
+- The normal USB listener binds only to loopback. Wi-Fi uses a separate TLS listener on 8788, exact certificate pinning and bearer authentication. No cloud relay, external viewer assets, telemetry, or system-wide TLS bypass.
+- Changing or deleting the Mac TLS identity or forgetting pairing requires pairing the Android app again. Stop capture or quit the host to end sharing.
+
+## Browser fallback and troubleshooting
+
+`./scripts/connect-usb.sh` creates the USB tunnel and opens the native app if installed, otherwise the browser viewer. The browser uses `http://127.0.0.1:8787/` and manual session-token pairing. It cannot control BOOX hardware refresh modes.
+
+Run `./scripts/doctor.sh` for basic diagnostics. If ADB reports unauthorized, accept the prompt on the BOOX. If no device appears, reconnect a data cable and keep the device unlocked. A repeated USB 'device not responding' error can require restarting the tablet before installation; that is independent of the display-streaming code.
+
+If the BOOX freezes newly installed apps, unfreeze **BOOX Sidecar** in its app management settings. A disabled app can misleadingly appear as “Activity does not exist” during pairing. After rebuilding the ad-hoc-signed Mac app, macOS may retain an obsolete capture permission: remove its old entry and add the exact current `dist/BOOX Sidecar.app` under Screen & System Audio Recording, then quit and reopen it.
