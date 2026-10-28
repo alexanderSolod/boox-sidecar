@@ -47,12 +47,10 @@ struct DisplayInfo: Identifiable {
     private var usbWatcher: Task<Void, Never>?
     private var seenUSBDevices = Set<String>()
     private var wirelessGeneration = 0
-    var hostID: String {
-        if !fingerprint.isEmpty { return fingerprint.lowercased().replacingOccurrences(of: ":", with: "") }
-        // USB remains usable when TLS cannot load (including macOS 14). The
-        // random credential has 256 bits of entropy; its hash reveals no secret.
-        return SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
+    private(set) var hostID = ""
+    private var tlsIdentity: TLSIdentity?
+    private var tlsDirectory: URL?
+    let wifiPort: UInt16
     let port: UInt16
     let lan: Bool
     let developmentBrowser: Bool
@@ -72,6 +70,7 @@ struct DisplayInfo: Identifiable {
         developmentBrowser = args.contains("--development-browser")
         lan = false
         if let index = args.firstIndex(of: "--port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { port = value } else { port = 8787 }
+        if let index = args.firstIndex(of: "--wifi-port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { wifiPort = value } else { wifiPort = 8788 }
         if demo || developmentBrowser { credentialStore = nil }
         else {
             let directory: URL
@@ -80,7 +79,19 @@ struct DisplayInfo: Identifiable {
             credentialStore = PairingCredentialStore(directory: directory)
         }
         var credentialFailure: String?
-        do { token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken() }
+        token = ""
+        do {
+            token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken()
+            hostID = try credentialStore.map { try HostIdentityStore(directory: $0.directory).loadOrCreate() } ?? PairingCredentialStore.randomToken()
+            if !browserEnabled {
+                if let index = args.firstIndex(of: "--tls-directory"), args.indices.contains(index + 1) {
+                    tlsDirectory = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                } else { tlsDirectory = credentialStore?.directory.appendingPathComponent("TLS", isDirectory: true) }
+                let tls = try TLSIdentity.load(directory: tlsDirectory)
+                tlsIdentity = tls
+                fingerprint = tls.spkiPin
+            }
+        }
         catch { token = ""; credentialFailure = error.localizedDescription }
         if args.contains("--lan") || (browserEnabled && args.contains("--wireless")) {
             token = ""
@@ -101,7 +112,7 @@ struct DisplayInfo: Identifiable {
         server.onReady = { [weak self] in Task { @MainActor in self?.serverReady = true } }
         server.onError = { [weak self] text in Task { @MainActor in self?.message = "Server: \(text)"; self?.serverReady = false } }
         do {
-            if !token.isEmpty { try server.start(port: port, lan: lan) }
+            if !token.isEmpty { try server.start(port: port, lan: false, tlsIdentity: tlsIdentity?.identity) }
             // CLI output is intentionally a local pairing credential; never transmitted to a third party.
             if demo { print("BOOX Sidecar DEMO viewer: \(viewerURL)"); fflush(stdout) }
         } catch { message = "Unable to start server: \(error.localizedDescription)" }
@@ -235,6 +246,12 @@ struct DisplayInfo: Identifiable {
         message = "BOOX extended display removed."
     }
 
+    func setWirelessPreference(_ enabled: Bool) {
+        guard !browserEnabled else { return }
+        UserDefaults.standard.set(enabled, forKey: "wireless.enabled")
+        enableWireless(enabled)
+    }
+
     func enableWireless(_ enabled: Bool) {
         guard !browserEnabled else { return }
         if !enabled {
@@ -251,13 +268,9 @@ struct DisplayInfo: Identifiable {
         wirelessGeneration += 1
         let attempt = wirelessGeneration
         do {
-            let args = CommandLine.arguments
-            let directory: URL?
-            if let index = args.firstIndex(of: "--tls-directory"), args.indices.contains(index + 1) {
-                directory = URL(fileURLWithPath: args[index + 1], isDirectory: true)
-            } else { directory = nil }
-            let tls = try TLSIdentity.load(directory: directory)
-            fingerprint = tls.fingerprint
+            guard let tls = tlsIdentity, tls.valid(at: Date()) else {
+                throw NSError(domain: "BOOXSidecar.TLS", code: 1, userInfo: [NSLocalizedDescriptionKey: "The secure host identity is unavailable."])
+            }
             wirelessServer.handler = { [weak self] request, reply in
                 Task { @MainActor in reply(self?.handle(request) ?? .error("Host unavailable", status: 503)) }
             }
@@ -266,7 +279,7 @@ struct DisplayInfo: Identifiable {
                 self.wirelessStarting = false
                 self.wirelessEnabled = true
                 self.advertiser.onError = { [weak self] text in self?.wirelessMessage = text }
-                self.advertiser.start(hostID: self.hostID)
+                self.advertiser.start(hostID: self.hostID, port: self.wifiPort)
                 self.wirelessMessage = "Encrypted Wi-Fi and automatic discovery are ready."
             } }
             wirelessServer.onError = { [weak self] text in Task { @MainActor in
@@ -276,7 +289,7 @@ struct DisplayInfo: Identifiable {
                 self.advertiser.stop()
                 self.wirelessMessage = "Wi-Fi: \(text)"
             } }
-            try wirelessServer.start(port: 8788, lan: true, tlsIdentity: tls.identity)
+            try wirelessServer.start(port: wifiPort, lan: true, tlsIdentity: tls.identity)
             wirelessMessage = "Starting encrypted Wi-Fi…"
         } catch { wirelessStarting = false; wirelessEnabled = false; wirelessMessage = "Wi-Fi unavailable: \(error.localizedDescription)" }
     }
@@ -306,7 +319,7 @@ struct DisplayInfo: Identifiable {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
             guard serverReady else { connectionRequested = false; connectionMessage = "The local server is unavailable. " + message; return }
-            enableWireless(true)
+            if UserDefaults.standard.object(forKey: "wireless.enabled") as? Bool ?? true { enableWireless(true) }
             if demo { start() } else { await createExtendedDisplay() }
             for _ in 0..<100 {
                 if !starting || Task.isCancelled { break }
@@ -355,7 +368,7 @@ struct DisplayInfo: Identifiable {
         defer { pairingDevice = false }
         let pairPort = port, pairToken = token, pin = fingerprint.isEmpty ? nil : fingerprint, identity = hostID
         let address = wirelessAddresses.first
-        let pairHost = wirelessEnabled && address != nil ? "https://\(address!):8788" : "http://127.0.0.1:\(port)"
+        let pairHost = wirelessEnabled && address != nil ? "https://\(address!):\(wifiPort)" : "https://127.0.0.1:\(port)"
         let oldDevices = seenUSBDevices
         do {
             let worker = Task.detached(priority: .utility) { () throws -> (Set<String>, Int, String?) in
@@ -393,7 +406,7 @@ struct DisplayInfo: Identifiable {
         do {
             token = try credentialStore?.rotate() ?? PairingCredentialStore.randomToken()
             if !serverReady {
-                try server.start(port: port, lan: lan)
+                try server.start(port: port, lan: false, tlsIdentity: tlsIdentity?.identity)
             }
             connectionMessage = "Pairing forgotten. Connect the BOOX by USB and click Connect to pair again."
         } catch { connectionMessage = error.localizedDescription }
@@ -420,15 +433,16 @@ struct DisplayInfo: Identifiable {
                 message = "Enable encrypted Wi-Fi and connect the Mac to your network first."
                 return
             }
-            host = "https://\(address):8788"
+            host = "https://\(address):\(wifiPort)"
             certificate = fingerprint
-        } else { host = "http://127.0.0.1:\(port)"; certificate = fingerprint.isEmpty ? nil : fingerprint }
+        } else { host = "https://127.0.0.1:\(port)"; certificate = fingerprint.isEmpty ? nil : fingerprint }
         pairingDevice = true
         let pairPort = port, pairToken = token, pairID = hostID
+        let wifiHost = wirelessAddresses.first.map { "https://\($0):\(wifiPort)" }
         Task {
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try DevicePairing.pair(port: pairPort, host: host, token: pairToken, fingerprint: certificate, hostID: pairID, preferUSB: !useWiFi)
+                    try DevicePairing.pair(port: pairPort, host: host, token: pairToken, fingerprint: certificate, hostID: pairID, preferUSB: !useWiFi, wifiHost: wifiHost)
                 }.value
                 message = useWiFi ? "Wi-Fi pairing sent to the BOOX app. Confirm it connects, then unplug USB." : "USB pairing sent to the BOOX app."
             } catch { message = error.localizedDescription }
@@ -521,12 +535,12 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 1, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "fingerprint": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
+        ["protocol": 2, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
         // Prevent DNS rebinding in default loopback mode.
-        if !lan && !request.secure {
+        if request.loopback {
             let allowed = ["127.0.0.1:\(port)", "localhost:\(port)"]
             guard let host = request.headers["host"], allowed.contains(host.lowercased()) else { return .error("Invalid Host", status: 403) }
         }
@@ -544,7 +558,7 @@ struct DisplayInfo: Identifiable {
         let postPaths = ["/api/settings", "/api/input"]
         if getPaths.contains(request.path) && request.method != "GET" || postPaths.contains(request.path) && request.method != "POST" { return .error("Method not allowed", status: 405) }
         switch request.path {
-        case "/health": return .json(["ok": true, "protocol": 1])
+        case "/health": return .json(["ok": true, "protocol": 2])
         case "/api/status": return .json(status())
         case "/api/displays": return .json(["displays": displays.map(\.json)])
         case "/api/frame":
@@ -556,6 +570,7 @@ struct DisplayInfo: Identifiable {
                   let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else { return .error("Expected JSON object", status: 400) }
             return request.path == "/api/settings" ? settings(object) : input(object)
         case "/", "/index.html", "/app.js", "/style.css":
+            guard browserEnabled else { return .error("Browser access requires --development-browser", status: 404) }
             let filename = request.path == "/" ? "index.html" : String(request.path.dropFirst())
             let root: URL
             if let path = ProcessInfo.processInfo.environment["BOOX_VIEWER_PATH"] { root = URL(fileURLWithPath: path, isDirectory: true) }

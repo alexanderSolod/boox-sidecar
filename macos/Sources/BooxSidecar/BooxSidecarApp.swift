@@ -90,14 +90,14 @@ struct HostView: View {
                             Button("Remove display") { host.removeExtendedDisplay() }.disabled(host.virtualDisplayID == 0 || host.creatingExtendedDisplay)
                         }
                         Text("The separate desktop uses experimental private macOS display APIs. You can also select an existing display above.").font(.caption).foregroundStyle(.secondary)
-                        Toggle("Enable encrypted Wi-Fi (port 8788)", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.enableWireless($0) })).disabled(host.browserEnabled)
+                        Toggle("Enable encrypted Wi-Fi (port \(host.wifiPort))", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.setWirelessPreference($0) })).disabled(host.browserEnabled)
                         if !host.wirelessMessage.isEmpty { Text(host.wirelessMessage).font(.caption).textSelection(.enabled) }
                         HStack {
                             Button("Pair app for USB") { host.pairBOOX(useWiFi: false) }.disabled(host.pairingDevice || host.browserEnabled)
                             Button("Pair app for Wi-Fi") { host.pairBOOX(useWiFi: true) }.disabled(host.pairingDevice || host.browserEnabled || !host.wirelessEnabled)
-                            Button("Copy certificate fingerprint") { host.copyFingerprint() }.disabled(host.fingerprint.isEmpty)
+                            Button("Copy public-key pin") { host.copyFingerprint() }.disabled(host.fingerprint.isEmpty)
                         }
-                        if let address = host.wirelessAddresses.first { Text("Wi-Fi address: \(address):8788").font(.caption).textSelection(.enabled) }
+                        if let address = host.wirelessAddresses.first { Text("Wi-Fi address: \(address):\(host.wifiPort)").font(.caption).textSelection(.enabled) }
                         HStack {
                             if host.browserEnabled { Button("Copy browser link") { host.copyLink() } }
                             Button("Copy pairing token") { host.copyToken() }

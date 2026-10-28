@@ -23,24 +23,28 @@ public final class NativeClientTest {
     public static void main(String[] args) throws Exception {
         String[] rejected = {
             "http://192.168.1.1:8787", "http://localhost:8787", "http://127.0.0.1:80",
-            "https://192.168.1.1:8787", "ftp://127.0.0.1:8787", "http://user@127.0.0.1:8787",
+            "http://127.0.0.1:8787", "ftp://127.0.0.1:8787", "http://user@127.0.0.1:8787",
             "http://127.0.0.1:8787/?token=x", "http://127.0.0.1:8787/#token=x",
             "https://192.168.1.1:8788/api/status", "http://127.0.0.1:8787.evil.example"
         };
         for (String endpoint : rejected) expectFailure(() -> PinnedClient.validateEndpoint(endpoint));
-        check("http://127.0.0.1:8787".equals(PinnedClient.validateEndpoint("http://127.0.0.1:8787/")));
+        check("https://127.0.0.1:8787".equals(PinnedClient.validateEndpoint("https://127.0.0.1:8787/")));
+        check("https://127.0.0.1:4443".equals(PinnedClient.validateEndpoint("https://127.0.0.1:4443/")));
+        expectFailure(() -> PinnedClient.validateEndpoint("https://127.0.0.1:65536"));
+        expectFailure(() -> PinnedClient.validateEndpoint("https://127.0.0.1:0"));
+        expectFailure(() -> PinnedClient.validateEndpoint("https://127.0.0.1"));
         check("https://192.168.1.2:8788".equals(PinnedClient.validateEndpoint("https://192.168.1.2:8788")));
         expectFailure(() -> new PinnedClient("http://127.0.0.1:8787", "bad", ""));
         expectFailure(() -> new PinnedClient("https://192.168.1.2:8788", TOKEN, ""));
         X509Certificate valid = certificate(args[0]);
         X509Certificate expired = certificate(args[1]);
-        String validPin = hex(MessageDigest.getInstance("SHA-256").digest(valid.getEncoded()));
+        String validPin = hex(MessageDigest.getInstance("SHA-256").digest(valid.getPublicKey().getEncoded()));
         PinnedClient matched = new PinnedClient("https://192.168.1.2:8788", TOKEN, validPin);
         verify(matched, valid);
         checks++;
         PinnedClient mismatched = new PinnedClient("https://192.168.1.2:8788", TOKEN, "0".repeat(64));
         expectFailure(() -> verify(mismatched, valid));
-        String expiredPin = hex(MessageDigest.getInstance("SHA-256").digest(expired.getEncoded()));
+        String expiredPin = hex(MessageDigest.getInstance("SHA-256").digest(expired.getPublicKey().getEncoded()));
         PinnedClient old = new PinnedClient("https://192.168.1.2:8788", TOKEN, expiredPin);
         expectFailure(() -> verify(old, expired));
         check(PinnedClient.normalizePin("AB:CD EF").equals("abcdef"));
@@ -54,11 +58,11 @@ public final class NativeClientTest {
         String usb = AutoRoutePolicy.USB;
         String oldWifi = "https://192.168.1.2:8788";
         String newWifi = "https://192.168.1.3:8788";
-        check(AutoRoutePolicy.candidates("auto", oldWifi, newWifi).equals(java.util.List.of(usb, newWifi, oldWifi)));
-        check(AutoRoutePolicy.candidates("auto", oldWifi, oldWifi).equals(java.util.List.of(usb, oldWifi)));
-        check(AutoRoutePolicy.candidates("usb", oldWifi, newWifi).equals(java.util.List.of(usb)));
-        check(AutoRoutePolicy.candidates("wifi", oldWifi, newWifi).equals(java.util.List.of(newWifi, oldWifi)));
-        check(AutoRoutePolicy.candidates("auto", "http://192.168.1.2:8787", "https://evil.invalid:443").equals(java.util.List.of(usb)));
+        check(AutoRoutePolicy.candidates("auto", usb, oldWifi, newWifi).equals(java.util.List.of(usb, newWifi, oldWifi)));
+        check(AutoRoutePolicy.candidates("auto", usb, oldWifi, oldWifi).equals(java.util.List.of(usb, oldWifi)));
+        check(AutoRoutePolicy.candidates("usb", usb, oldWifi, newWifi).equals(java.util.List.of(usb)));
+        check(AutoRoutePolicy.candidates("wifi", usb, oldWifi, newWifi).equals(java.util.List.of(newWifi, oldWifi)));
+        check(AutoRoutePolicy.candidates("auto", usb, "http://192.168.1.2:8787", "http://evil.invalid:443").equals(java.util.List.of(usb)));
         check(AutoRoutePolicy.identityMatches(identity, identity));
         check(!AutoRoutePolicy.identityMatches(identity, "0".repeat(64)));
         check(!AutoRoutePolicy.identityMatches("", ""));
@@ -66,10 +70,10 @@ public final class NativeClientTest {
         check(AutoRoutePolicy.retryDelay(0) == 500);
         check(AutoRoutePolicy.retryDelay(1) == 1000);
         check(AutoRoutePolicy.retryDelay(20) == 8000);
-        check(AutoRoutePolicy.shouldProbeUsb("auto", newWifi, 10000, 10000));
-        check(!AutoRoutePolicy.shouldProbeUsb("auto", newWifi, 9999, 10000));
-        check(!AutoRoutePolicy.shouldProbeUsb("wifi", newWifi, 20000, 10000));
-        check(!AutoRoutePolicy.shouldProbeUsb("auto", usb, 20000, 10000));
+        check(AutoRoutePolicy.shouldProbeUsb("auto", newWifi, usb, 10000, 10000));
+        check(!AutoRoutePolicy.shouldProbeUsb("auto", newWifi, usb, 9999, 10000));
+        check(!AutoRoutePolicy.shouldProbeUsb("wifi", newWifi, usb, 20000, 10000));
+        check(!AutoRoutePolicy.shouldProbeUsb("auto", usb, usb, 20000, 10000));
     }
     static void verifierReuseChecks(PinnedClient client, X509Certificate valid) throws Exception {
         java.util.ArrayList<FakeHttps> opened = new java.util.ArrayList<>();

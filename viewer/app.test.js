@@ -48,7 +48,7 @@ function browserHarness(intercept) {
   const document = { getElementById: element, createElement() { return {}; }, addEventListener() {} };
   const storage = new Map();
   const sessionStorage = { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) };
-  const status = { protocol: 1, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1 };
+  const status = { protocol: 2, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1 };
   const window = { document, location: { hash: '', pathname: '/', search: '' }, addEventListener() {} };
   const fetch = async (path, options) => {
     calls.push({ path, options });
@@ -127,7 +127,7 @@ test('protocol is checked after a failed first connection and unsupported hosts 
   const h = browserHarness((path, options, status) => {
     if (path === '/api/status') {
       if (first) { first = false; throw new Error('not ready'); }
-      return { ok: true, status: 200, json: async () => ({ ...status, protocol: 2 }) };
+      return { ok: true, status: 200, json: async () => ({ ...status, protocol: 99 }) };
     }
   });
   await h.connect(); await h.tick();

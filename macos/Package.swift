@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "BooxSidecar",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("15.0")],
     products: [.executable(name: "BooxSidecar", targets: ["BooxSidecar"])],
     targets: [
         .target(name: "VirtualDisplayKit", cSettings: [.unsafeFlags(["-fobjc-arc"])], linkerSettings: [.linkedFramework("CoreGraphics"), .linkedFramework("Foundation")]),

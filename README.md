@@ -9,11 +9,11 @@ Installing a release build instead of compiling? See [docs/INSTALL.md](docs/INST
 1. Open `dist/BOOX Sidecar.app` on the Mac and grant Screen Recording when requested.
 2. On first setup, connect the BOOX by USB, enable USB debugging and authorize this Mac.
 3. Install the Android app: `./scripts/install-native.sh`.
-4. Click **Connect** on the Mac. It creates the BOOX desktop, starts capture, enables encrypted Wi-Fi when available, establishes the USB tunnel and provisions the installed native app.
+4. Click **Connect** on the Mac. It creates the BOOX desktop, starts capture, enables encrypted Wi-Fi when available unless explicitly disabled, establishes the USB tunnel and provisions the installed native app.
 5. Move windows across the Mac screen's right edge onto the BOOX desktop. Its logical size is 1240 × 930, backed by a 2480 × 1860 HiDPI display.
 6. Later, open both apps and click **Connect**. The Android app remembers this Mac. **Auto** prefers USB, falls back to the saved pinned Wi-Fi route, and returns to USB when available. Wi-Fi needs both devices on a reachable network; USB works without Wi-Fi.
 
-Pairing survives normal Mac restarts. Local discovery can find a remembered Mac after its LAN address changes; it cannot pair an unknown Mac or bypass certificate verification. If TLS is unavailable, Connect still provisions USB with a stable host identity. Enabling TLS later may require USB provisioning again. Advanced controls retain manual pairing and USB/Wi-Fi preferences.
+Protocol 2 requires updating both apps and pairing once again over USB; legacy plaintext clients are unsupported. The migration creates a new `pairing-token-v2` credential. Later pairing survives normal Mac restarts. Local discovery can find a remembered Mac after its LAN address changes; it cannot pair an unknown Mac or bypass certificate verification. Both native transports require the saved public-key pin and valid TLS. If TLS is unavailable, native connections fail closed. Advanced controls retain manual pairing and USB/Wi-Fi preferences.
 
 The Mac stores its pairing credential and TLS identity privately under `~/Library/Application Support/BOOX Sidecar/`; no certificate is installed into system trust. **Forget pairing** stops sharing and replaces the saved credential, so old pairings must be provisioned again. Disconnect stops sharing while retaining pairing.
 
@@ -37,7 +37,7 @@ The Android **Faster panel…** button explicitly offers X mode, with reduced de
 
 ## Build
 
-Mac: macOS 14+ and Swift Command Line Tools. Encrypted Wi-Fi requires macOS 15+ because private-key import stays in process memory instead of modifying the Keychain.
+Mac: macOS 15+ and Swift Command Line Tools. Private-key import stays in process memory instead of modifying the Keychain.
 
 ```sh
 ./scripts/build-mac.sh
@@ -75,7 +75,7 @@ See [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE
 - Portrait desktop presets, pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
 - Wi-Fi requires a route between tablet and Mac; guest/client-isolated networks can prevent it.
 - The host keeps one latest JPEG and clients bound their work. Static screens may produce fewer frames than the requested rate.
-- The normal USB listener binds only to loopback. Wi-Fi uses a separate TLS listener on 8788, exact certificate pinning and bearer authentication. No cloud relay, external viewer assets, telemetry, or system-wide TLS bypass.
+- The normal USB TLS listener binds only to loopback on 8787. Wi-Fi uses a separate TLS listener on 8788. Both use SHA-256 public-key/SPKI pinning and bearer authentication. No cloud relay, external viewer assets, telemetry, or system-wide TLS bypass.
 - Changing or deleting the Mac TLS identity or forgetting pairing requires pairing the Android app again. Stop capture or quit the host to end sharing.
 
 ## Browser fallback and troubleshooting

@@ -4,7 +4,7 @@ Copy-pasteable steps for users and coding agents. Release assets:
 
 | Asset | Contents |
 | --- | --- |
-| `BOOX-Sidecar-v0.3.0-macOS.zip` | Ad-hoc-signed Mac host app (macOS 14+; encrypted Wi-Fi needs macOS 15+) |
+| `BOOX-Sidecar-v0.3.0-macOS.zip` | Ad-hoc-signed Mac host app (macOS 15+) |
 | `BOOX-Sidecar-v0.3.0.apk` | Debug-signed Android receiver (Android 8+; built for BOOX e-ink tablets) |
 
 Verify downloads against `SHA256SUMS.txt` in the same release:
@@ -92,7 +92,7 @@ adb reverse --remove tcp:8787
 ## Build from source instead
 
 ```sh
-./scripts/build-mac.sh                        # needs macOS 14+ and Swift Command Line Tools
+./scripts/build-mac.sh                        # needs macOS 15+ and Swift Command Line Tools
 python3 scripts/bootstrap-android.py          # project-local JDK17/Gradle/SDK, checksum-verified
 sh android/build.sh && ./scripts/install-native.sh
 ```

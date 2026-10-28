@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Native JPEG receiver with one network/decode worker and at most one pending UI frame. */
 public final class MainActivity extends Activity {
-    private static final String USB = "http://127.0.0.1:8787";
+    private static final String USB = AutoRoutePolicy.USB;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
     private final ScheduledThreadPoolExecutor usbProbeWorker = new ScheduledThreadPoolExecutor(1);
@@ -120,7 +120,7 @@ public final class MainActivity extends Activity {
     }
 
     private String savedHostId() {
-        return preferences.getString("hostId", preferences.getString("wifiPin", ""));
+        return preferences.getString("hostId", "");
     }
 
     private void buildUi() {
@@ -207,7 +207,7 @@ public final class MainActivity extends Activity {
                     discovery.stop();
                     discoveredEndpoint = "";
                     preferences.edit().remove("token").remove("wifiPin").remove("wifiHost").remove("usbHost")
-                            .remove("hostId").remove("wifi").remove("connectionMode").apply();
+                            .remove("hostId").remove("wifi").remove("connectionMode").remove("pairingVersion").remove("spkiPin").apply();
                     frameView.clearFrame();
                     status.setText("Saved pairing removed. Connect once by USB and press Connect on your Mac.");
                 }).show()));
@@ -230,14 +230,14 @@ public final class MainActivity extends Activity {
         fields.setOrientation(LinearLayout.VERTICAL);
         fields.setPadding(dp(20), dp(8), dp(20), dp(8));
         CheckBox wifi = new CheckBox(this);
-        wifi.setText("Use Wi-Fi (HTTPS certificate pin required)");
+        wifi.setText("Include Wi-Fi route");
         wifi.setChecked(!preferences.getString("wifiHost", "").isEmpty());
         fields.addView(wifi);
-        EditText host = field(fields, "Mac URL", preferences.getString("wifiHost", USB), false);
+        EditText host = field(fields, "Wi-Fi Mac URL", preferences.getString("wifiHost", "https://192.168.1.100:8788"), false);
+        EditText usb = field(fields, "USB HTTPS URL", preferences.getString("usbHost", USB), false);
         EditText token = field(fields, "Mac session token (64 hex characters)", preferences.getString("token", ""), true);
-        EditText pin = field(fields, "Mac certificate SHA-256 / host identity", savedHostId(), false);
-        wifi.setOnCheckedChangeListener((button, checked) -> host.setText(checked
-                ? preferences.getString("wifiHost", "https://192.168.1.100:8788") : USB));
+        EditText pin = field(fields, "Mac public-key SHA-256 pin", preferences.getString("spkiPin", ""), false);
+        EditText identity = field(fields, "Mac installation identity", savedHostId(), false);
         TextView instructions = new TextView(this);
         instructions.setText("Usually you only need to connect USB once and press Connect on your Mac.\n"
                 + "Auto prefers authenticated USB, then the saved Mac over pinned Wi-Fi.\n"
@@ -250,10 +250,10 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null).setPositiveButton("Connect", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             try {
-                String endpoint = PinnedClient.validateEndpoint(host.getText().toString());
-                if (wifi.isChecked() != endpoint.startsWith("https:")) throw new Exception("Match the URL to your selected USB or Wi-Fi mode.");
-                PairingStore.Record record = PairingStore.validate(endpoint, token.getText().toString().trim(),
-                        pin.getText().toString(), pin.getText().toString());
+                String usbEndpoint = usb.getText().toString().trim();
+                String wifiEndpoint = wifi.isChecked() ? host.getText().toString().trim() : "";
+                PairingStore.Record record = PairingStore.validate(usbEndpoint, usbEndpoint, wifiEndpoint,
+                        token.getText().toString().trim(), pin.getText().toString(), identity.getText().toString(), "auto");
                 new AlertDialog.Builder(this).setTitle("Replace saved pairing?")
                         .setMessage("Trust these Mac pairing details and replace the saved connection?")
                         .setNegativeButton("Cancel", null)
@@ -306,11 +306,7 @@ public final class MainActivity extends Activity {
         frameView.clearFrame();
         final int session = generation;
         try {
-            Pairing pairing = new Pairing(preferences.getString("token", ""), preferences.getString("wifiPin", ""),
-                    savedHostId(), preferences.getString("wifiHost", ""), preferences.getString("connectionMode", "auto"));
-            new PinnedClient(USB, pairing.token, pairing.pin);
-            if (!pairing.hostId.matches("[0-9a-f]{64}")) throw new Exception("Connect USB once and press Connect on your Mac to save its identity.");
-            if (!pairing.wifi.isEmpty() && !pairing.pin.equals(pairing.hostId)) throw new Exception("The saved Wi-Fi pin and Mac identity disagree. Pair over USB again.");
+            Pairing pairing = new Pairing(PairingStore.load(preferences));
             retryAttempt = 0;
             nextUsbProbeAt = 0;
             status.setText("Connecting to your saved Mac…");
@@ -325,13 +321,13 @@ public final class MainActivity extends Activity {
     private void selectRoute(int session, Pairing pairing) {
         if (!isCurrent(session)) return;
         String failure = "Mac unavailable. Keep the Mac app open and press Connect there.";
-        for (String endpoint : AutoRoutePolicy.candidates(pairing.mode, pairing.wifi, discoveredEndpoint)) {
+        for (String endpoint : AutoRoutePolicy.candidates(pairing.mode, pairing.usb, pairing.wifi, discoveredEndpoint)) {
             if (!isCurrent(session)) return;
             PinnedClient candidate = null;
             try {
                 candidate = new PinnedClient(endpoint, pairing.token, pairing.pin);
                 selectingClient = candidate;
-                if (USB.equals(endpoint)) candidate.setTimeouts(200, 500);
+                if (pairing.usb.equals(endpoint)) candidate.setTimeouts(200, 500);
                 JSONObject authenticated = candidate.json("/api/status", null);
                 validateHost(pairing, authenticated);
                 if (!isCurrent(session)) { candidate.cancel(); return; }
@@ -350,7 +346,7 @@ public final class MainActivity extends Activity {
     }
 
     private void validateHost(Pairing pairing, JSONObject status) throws Exception {
-        if (status.optInt("protocol", -1) != 1) throw new Exception("Unsupported Mac protocol.");
+        if (status.optInt("protocol", -1) != 2) throw new Exception("Unsupported Mac protocol.");
         if (!AutoRoutePolicy.identityMatches(pairing.hostId, status.optString("host_id", "")))
             throw new Exception("Mac identity mismatch. No connection was accepted.");
     }
@@ -370,8 +366,8 @@ public final class MainActivity extends Activity {
         nextUsbProbeAt = measurementStart + 10000;
         PendingFrame discard = pendingFrame.getAndSet(null);
         if (discard != null) discard.bitmap.recycle();
-        if (route.endpoint.startsWith("https:")) preferences.edit().putString("wifiHost", route.endpoint).apply();
-        Log.i("BooxSidecar", "Authenticated route connected: " + (USB.equals(route.endpoint) ? "USB" : "pinned Wi-Fi"));
+        if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
+        Log.i("BooxSidecar", "Authenticated route connected: " + (pairing.usb.equals(route.endpoint) ? "USB" : "pinned Wi-Fi"));
         ui.post(() -> {
             if (!isCurrent(session) || client != route.client) return;
             frameView.clearFrame();
@@ -383,21 +379,21 @@ public final class MainActivity extends Activity {
 
     private void maybeProbeUsb(int session, Pairing pairing, String endpoint) {
         long now = SystemClock.elapsedRealtime();
-        if (!AutoRoutePolicy.shouldProbeUsb(pairing.mode, endpoint, now, nextUsbProbeAt) || !usbProbeBusy.compareAndSet(false, true)) return;
+        if (!AutoRoutePolicy.shouldProbeUsb(pairing.mode, endpoint, pairing.usb, now, nextUsbProbeAt) || !usbProbeBusy.compareAndSet(false, true)) return;
         nextUsbProbeAt = now + 10000;
         usbProbeWorker.execute(() -> {
             PinnedClient probe = null;
             boolean accepted = false;
             try {
                 if (!isCurrent(session)) return;
-                probe = new PinnedClient(USB, pairing.token, pairing.pin);
+                probe = new PinnedClient(pairing.usb, pairing.token, pairing.pin);
                 usbProbeClient = probe;
                 probe.setTimeouts(200, 300);
                 JSONObject authenticated = probe.json("/api/status", null);
                 validateHost(pairing, authenticated);
                 if (!isCurrent(session)) return;
                 probe.setTimeouts(2500, 3500);
-                VerifiedRoute replaced = verifiedUsb.getAndSet(new VerifiedRoute(session, probe, USB, authenticated));
+                VerifiedRoute replaced = verifiedUsb.getAndSet(new VerifiedRoute(session, probe, pairing.usb, authenticated));
                 if (replaced != null) replaced.client.cancel();
                 accepted = true;
             } catch (Exception ignored) {
@@ -412,12 +408,16 @@ public final class MainActivity extends Activity {
 
     private String connectionError(Exception exception) {
         return exception instanceof javax.net.ssl.SSLException
-                ? "Wi-Fi certificate verification failed. Re-pair over USB if the Mac identity changed."
+                ? "Mac certificate verification failed. Re-pair over USB if the Mac identity changed."
                 : exception.getMessage() == null ? "Mac unavailable" : exception.getMessage();
     }
 
     private void startDiscovery() {
         if (!resumed) return;
+        if (preferences.getInt("pairingVersion", 0) != 2 || "usb".equals(preferences.getString("connectionMode", "auto"))) {
+            discovery.stop();
+            return;
+        }
         String expectedId = savedHostId();
         discovery.start(expectedId, endpoint -> {
             if (!resumed || !expectedId.equals(savedHostId())) return;
@@ -489,7 +489,7 @@ public final class MainActivity extends Activity {
                         : result.optBoolean("demo") ? "Demo frames" : "Connected";
                 nextStatusAt = started + (hostAsleep ? 5000 : 2000);
                 double measured = receivedFrames * 1000.0 / Math.max(1, started - measurementStart);
-                postStatus(session, (USB.equals(endpoint) ? "USB" : "Wi-Fi") + " · " + hostStatus + " · " + fps + " FPS requested · "
+                postStatus(session, (pairing.usb.equals(endpoint) ? "USB" : "Wi-Fi") + " · " + hostStatus + " · " + fps + " FPS requested · "
                         + String.format(java.util.Locale.ROOT, "%.1f", measured) + " FPS received · "
                         + (color ? "color" : "grayscale") + " · " + maxWidth + " px", !captureReady);
                 if (started - measurementStart >= 5000) {
@@ -804,10 +804,10 @@ public final class MainActivity extends Activity {
     }
 
     private static final class Pairing {
-        final String token, pin, hostId, wifi, mode;
-        Pairing(String token, String pin, String hostId, String wifi, String mode) {
-            this.token = token; this.pin = pin; this.hostId = hostId; this.wifi = wifi;
-            this.mode = "usb".equals(mode) || "wifi".equals(mode) ? mode : "auto";
+        final String token, pin, hostId, usb, wifi, mode;
+        Pairing(PairingStore.Record record) {
+            this.token = record.token; this.pin = record.pin; this.hostId = record.hostId;
+            this.usb = record.usb; this.wifi = record.wifi; this.mode = record.mode;
         }
     }
     private static final class VerifiedRoute {

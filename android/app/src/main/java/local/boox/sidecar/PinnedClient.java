@@ -48,20 +48,18 @@ final class PinnedClient {
                 return expectedHost.equalsIgnoreCase(hostname);
             } catch (Exception exception) { return false; }
         };
-        if (this.endpoint.startsWith("https:")) {
-            if (!pin.matches("[0-9a-f]{64}")) throw new IOException("Wi-Fi requires the Mac certificate SHA-256 pin.");
-            SSLContext context = SSLContext.getInstance("TLS");
-            context.init(null, new TrustManager[]{new X509TrustManager() {
-                @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
-                @Override public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                    throw new CertificateException("Client certificates are not used.");
-                }
-                @Override public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
-                    verifyCertificate(chain);
-                }
-            }}, null);
-            sockets = context.getSocketFactory();
-        } else sockets = null;
+        if (!pin.matches("[0-9a-f]{64}")) throw new IOException("Pair over USB to save the Mac public-key SHA-256 pin.");
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, new TrustManager[]{new X509TrustManager() {
+            @Override public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            @Override public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                throw new CertificateException("Client certificates are not used.");
+            }
+            @Override public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                verifyCertificate(chain);
+            }
+        }}, null);
+        sockets = context.getSocketFactory();
     }
 
     static String normalizePin(String input) {
@@ -71,13 +69,13 @@ final class PinnedClient {
     static String validateEndpoint(String input) throws IOException {
         try {
             URI uri = new URI(input == null ? "" : input.trim());
-            boolean loopback = "http".equals(uri.getScheme()) && "127.0.0.1".equals(uri.getHost()) && uri.getPort() == 8787;
-            boolean tls = "https".equals(uri.getScheme()) && uri.getHost() != null && !uri.getHost().isEmpty() && uri.getPort() == 8788;
-            if ((!loopback && !tls) || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null
+            boolean tls = "https".equals(uri.getScheme()) && uri.getHost() != null && !uri.getHost().isEmpty()
+                    && uri.getPort() > 0 && uri.getPort() <= 65535;
+            if (!tls || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null
                     || !(uri.getPath().isEmpty() || "/".equals(uri.getPath()))) throw new IOException("Invalid host");
             return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), null, null, null).toString();
         } catch (Exception exception) {
-            throw new IOException("Use http://127.0.0.1:8787 for USB or https://MAC_IP:8788 for Wi-Fi.");
+            throw new IOException("Use an HTTPS host with an explicit port, such as https://127.0.0.1:8787 for USB.");
         }
     }
 
@@ -85,10 +83,10 @@ final class PinnedClient {
         if (chain == null || chain.length == 0) throw new CertificateException("Missing server certificate.");
         chain[0].checkValidity();
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(chain[0].getEncoded());
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(chain[0].getPublicKey().getEncoded());
             byte[] expected = new byte[32];
             for (int i = 0; i < expected.length; i++) expected[i] = (byte) Integer.parseInt(pin.substring(i * 2, i * 2 + 2), 16);
-            if (!MessageDigest.isEqual(digest, expected)) throw new CertificateException("Mac certificate pin mismatch.");
+            if (!MessageDigest.isEqual(digest, expected)) throw new CertificateException("Mac public-key pin mismatch.");
         } catch (CertificateException exception) { throw exception; }
         catch (Exception exception) { throw new CertificateException("Cannot verify Mac certificate.", exception); }
     }
@@ -123,7 +121,6 @@ final class PinnedClient {
             if (connection instanceof HttpsURLConnection) {
                 HttpsURLConnection tls = (HttpsURLConnection) connection;
                 tls.setSSLSocketFactory(sockets);
-                // A provisioned exact leaf pin is the server identity; recheck it here too.
                 tls.setHostnameVerifier(hostnameVerifier);
             }
             if (body != null) {

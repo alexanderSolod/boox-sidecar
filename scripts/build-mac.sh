@@ -29,7 +29,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.3.2</string>
 <key>CFBundleVersion</key><string>5</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>NSLocalNetworkUsageDescription</key><string>Stream your selected desktop to your paired BOOX over encrypted Wi-Fi.</string>
 <key>NSBonjourServices</key><array><string>_boox-sidecar._tcp</string></array>
 <key>NSHighResolutionCapable</key><true/>

@@ -130,7 +130,7 @@
     });
   }
   function validateProtocol(next) {
-    if (next.protocol !== 1) { var error = new Error('This host uses an unsupported protocol. Update the viewer and host together.'); error.code = 'PROTOCOL'; throw error; }
+    if (next.protocol !== 2) { var error = new Error('This host uses an unsupported protocol. Update the viewer and host together.'); error.code = 'PROTOCOL'; throw error; }
   }
   async function initialize(run) {
     var next = await request('/api/status', {}, run);

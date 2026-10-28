@@ -4,6 +4,7 @@ import Security
 
 struct HTTPRequest {
     let secure: Bool
+    var loopback: Bool = false
     let method: String
     let path: String
     let query: [String: String]
@@ -28,6 +29,7 @@ struct HTTPResponse {
 final class HTTPServer {
     private var listener: NWListener?
     private var secure = false
+    private var loopback = true
     private var timeouts: [ObjectIdentifier: DispatchWorkItem] = [:]
     private let queue = DispatchQueue(label: "boox.http")
     private var connections: [UUID: NWConnection] = [:]
@@ -37,6 +39,7 @@ final class HTTPServer {
 
     func start(port: UInt16, lan: Bool, tlsIdentity: SecIdentity? = nil) throws {
         secure = tlsIdentity != nil
+        loopback = !lan
         let parameters: NWParameters
         // Frame polling uses small requests followed by large image responses.
         // Avoid Nagle/delayed-ACK stalls on the small control messages.
@@ -136,7 +139,7 @@ final class HTTPServer {
             guard data.count == expected else { self.send(.error("Pipelining is not supported", status: 400), on: connection); return }
             var query: [String: String] = [:]
             for item in url.queryItems ?? [] { query[item.name] = item.value ?? "" }
-            let request = HTTPRequest(secure: self.secure, method: String(first[0]), path: url.path, query: query, headers: headers, body: Data(data[range.upperBound..<expected]))
+            let request = HTTPRequest(secure: self.secure, loopback: self.loopback, method: String(first[0]), path: url.path, query: query, headers: headers, body: Data(data[range.upperBound..<expected]))
             guard let handler = self.handler else { self.send(.error("Starting", status: 503), on: connection); return }
             let keepAlive = first[2] == "HTTP/1.1" && headers["connection"]?.lowercased() != "close"
             handler(request) { response in self.queue.async { self.send(response, on: connection, keepAlive: keepAlive) } }

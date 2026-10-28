@@ -63,8 +63,9 @@ enum DevicePairing {
         }
     }
 
-    static func provision(device: BOOXUSBDevice, port: UInt16, host: String, token: String, fingerprint: String?, hostID: String?, preferUSB: Bool = false) throws {
-        guard [device.serial, host, token, fingerprint ?? "", hostID ?? ""].allSatisfy(safe), PairingCredentialStore.valid(token) else { throw failure("Invalid pairing parameters.") }
+    static func provision(device: BOOXUSBDevice, port: UInt16, host: String, token: String, fingerprint: String?, hostID: String?, preferUSB: Bool = false, wifiHost: String? = nil) throws {
+        guard [device.serial, host, token, fingerprint ?? "", hostID ?? "", wifiHost ?? ""].allSatisfy(safe), PairingCredentialStore.valid(token),
+              PairingCredentialStore.valid(fingerprint ?? ""), PairingCredentialStore.valid(hostID ?? "") else { throw failure("Invalid pairing parameters.") }
         try Task.checkCancellation()
         let adb = try executable()
         try ensureReverse(device: device, port: port)
@@ -72,18 +73,19 @@ enum DevicePairing {
         guard installed.contains("package:") else { throw failure("Install the BOOX Sidecar Android app before pairing.") }
         // BOOX app freezing can leave this exact installed package disabled.
         _ = try run(adb, ["-s", device.serial, "shell", "pm", "enable", "local.boox.sidecar"])
-        var args = ["-s", device.serial, "shell", "am", "start", "-n", "local.boox.sidecar/.ProvisioningActivity", "--es", "host", host, "--es", "usb_host", "http://127.0.0.1:\(port)", "--es", "token", token, "--ez", "auto_connect", "true"]
-        if let fingerprint, !fingerprint.isEmpty { args += ["--es", "cert_sha256", fingerprint] }
+        var args = ["-s", device.serial, "shell", "am", "start", "-n", "local.boox.sidecar/.ProvisioningActivity", "--es", "host", host, "--ei", "pairing_version", "2", "--es", "usb_host", "https://127.0.0.1:\(port)", "--es", "token", token, "--ez", "auto_connect", "true"]
+        if let fingerprint, !fingerprint.isEmpty { args += ["--es", "spki_sha256", fingerprint] }
         if let hostID, !hostID.isEmpty { args += ["--es", "host_id", hostID] }
-        if preferUSB { args += ["--es", "preferred_transport", "usb"] }
+        if let wifiHost, !wifiHost.isEmpty { args += ["--es", "wifi_host", wifiHost] }
+        args += ["--es", "preferred_transport", preferUSB ? "usb" : "auto"]
         try Task.checkCancellation()
         _ = try run(adb, args)
     }
 
-    static func pair(port: UInt16, host: String, token: String, fingerprint: String?, hostID: String? = nil, preferUSB: Bool = false) throws {
+    static func pair(port: UInt16, host: String, token: String, fingerprint: String?, hostID: String? = nil, preferUSB: Bool = false, wifiHost: String? = nil) throws {
         let devices = try discover()
         guard devices.count == 1, let device = devices.first else { throw failure("Connect exactly one BOOX by USB and approve USB debugging.") }
-        try provision(device: device, port: port, host: host, token: token, fingerprint: fingerprint, hostID: hostID ?? fingerprint, preferUSB: preferUSB)
+        try provision(device: device, port: port, host: host, token: token, fingerprint: fingerprint, hostID: hostID, preferUSB: preferUSB, wifiHost: wifiHost)
     }
 
     static func outputIndicatesFailure(_ output: String) -> Bool {

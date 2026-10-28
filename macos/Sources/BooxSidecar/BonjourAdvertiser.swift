@@ -5,12 +5,12 @@ import Foundation
     private var service: NetService?
     var onError: ((String) -> Void)?
 
-    func start(hostID: String) {
+    func start(hostID: String, port: UInt16) {
         stop()
         guard PairingCredentialStore.valid(hostID) else { return }
-        let service = NetService(domain: "local.", type: "_boox-sidecar._tcp.", name: "BOOX Sidecar " + hostID.prefix(8), port: 8788)
+        let service = NetService(domain: "local.", type: "_boox-sidecar._tcp.", name: "BOOX Sidecar " + hostID.prefix(8), port: Int32(port))
         service.delegate = self
-        service.setTXTRecord(NetService.data(fromTXTRecord: ["host_id": Data(hostID.utf8)]))
+        service.setTXTRecord(NetService.data(fromTXTRecord: ["host_id": Data(hostID.utf8), "protocol": Data("2".utf8)]))
         self.service = service
         service.publish()
     }

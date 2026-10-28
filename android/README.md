@@ -1,6 +1,6 @@
 # BOOX Sidecar native receiver
 
-This is a dedicated Java Android app, not a browser or WebView. A custom Canvas view displays the Mac's latest JPEG while a single worker handles authenticated HTTP requests and bitmap decoding. USB uses `adb reverse`; Wi-Fi uses HTTPS with a provisioned exact SHA-256 certificate pin.
+This is a dedicated Java Android app, not a browser or WebView. A custom Canvas view displays the Mac's latest JPEG while a single worker handles authenticated HTTP requests and bitmap decoding. USB uses `adb reverse`; both USB and Wi-Fi use HTTPS with a provisioned SHA-256 public-key/SPKI pin.
 
 The app targets API 35 and supports API 26+. The connected BOOX Note Air4 C reports Android 13. There are no third-party runtime libraries.
 
@@ -23,11 +23,15 @@ The first build downloads the pinned Android Gradle Plugin 8.7.3 and dependencie
 
 Start the Mac host and use the repository's USB pairing helper. The restricted `ProvisioningActivity` accepts explicit provisioning extras from callers holding `android.permission.DUMP` (including the ADB shell). The public launcher ignores pairing extras:
 
-- `host`: `http://127.0.0.1:8787` for USB or `https://MAC_IP:8788` for Wi-Fi.
-- `token`: the Mac's current 64-character hexadecimal session token.
-- `cert_sha256`: the Wi-Fi server certificate's SHA-256 fingerprint over its DER encoding (64 hex characters, optional colons).
+- `pairing_version`: integer `2`.
+- `host`: the primary HTTPS endpoint; `usb_host`: the required `https://127.0.0.1:PORT` USB endpoint.
+- `wifi_host`: an optional HTTPS Wi-Fi endpoint, retained during USB-only pairing.
+- `token`: the Mac's current 64-character hexadecimal pairing token.
+- `spki_sha256`: SHA-256 of the certificate's DER SubjectPublicKeyInfo (64 hex characters).
+- `host_id`: the independent 64-hex installation identity.
+- `preferred_transport`: `auto` (default), `usb`, or `wifi`.
 
-Pairing values are validated before a durable update. Invalid provisioning leaves the previous pairing intact. Manual replacement requires confirmation. A Wi-Fi provisioning intent selects Wi-Fi; USB provisioning selects USB. Both endpoint configurations are retained. Token and pin are kept in private app SharedPreferences, with Android backup and device-transfer exclusions. Tokens are never written to native app logs. Pair again after the Mac host rotates its session token. Use **Controls → Connect / pair** to edit settings or explicitly switch transports. There is no automatic downgrade from Wi-Fi to USB. **Clear saved pairing** removes the stored credentials.
+All values are validated before a durable update. Invalid provisioning leaves the previous pairing intact. Manual replacement requires confirmation. Saved pairing is private and excluded from backups. Auto prefers authenticated USB and then discovered/saved Wi-Fi. USB-only provisioning retains the supplied pin and a remembered same-key Wi-Fi endpoint. Both apps must support protocol 2; old pairings require trusted USB re-pairing. **Clear saved pairing** removes credentials.
 
 For USB, authorize this computer on the tablet and run:
 
@@ -49,7 +53,7 @@ Official BOOX references: [EPD screen update API](https://github.com/onyx-intl/O
 
 ## Transport and lifecycle guarantees
 
-The HTTPS client checks certificate validity dates and a constant-time SHA-256 match of the exact leaf certificate. Its hostname verifier only accepts the configured host after rechecking that pin. This supports a locally generated self-signed Mac certificate without disabling server identity verification. The custom TLS policy applies only to this session's connections. HTTP redirects are rejected and the token is never forwarded to another URL. Plain HTTP is accepted only for `127.0.0.1:8787`; LAN HTTP is rejected.
+The HTTPS client checks certificate validity dates and a constant-time SHA-256 match of the leaf certificate's SPKI. Its connection-scoped hostname verifier accepts the configured host only after verifying the paired key. USB, Wi-Fi, and Auto probes all use this policy. Redirects and plaintext endpoints are rejected. Renewing a certificate with the same key preserves trust; changing the key requires trusted re-pairing.
 
 There is one network/decode worker, one in-flight request, one displayed bitmap and at most one pending bitmap. New pending frames replace older pending frames. Input and settings are also bounded to their latest pending event. Responses are capped at 64 KiB for JSON and 12 MiB for JPEG, with dimension/decode limits. Connection/read timeouts are 2.5/3.5 seconds. Failures back off to 1.5-second retries. The receiver stops and cancels its connection when paused and starts a fresh session on resume. Session generations prevent stale frames from being displayed after reconnecting. The foreground Activity keeps the screen awake. If capture stops, Screen Recording permission is absent, or the connection fails, the app clears displayed/pending frames and suppresses input. Frames resume only after status reports capture and permission ready. Native diagnostics log the first actual Canvas draw dimensions once per session and received/requested FPS no more often than every five seconds; they contain no token or image content.
 
