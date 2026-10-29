@@ -6,6 +6,30 @@ if [[ "$CONFIG" != release && "$CONFIG" != debug ]]; then
   echo 'Usage: scripts/build-mac.sh [release|debug]' >&2
   exit 2
 fi
+SIGNING_MODE="${BOOX_SIGNING:-self}"
+SIGNING_IDENTITY="${BOOX_SIGN_IDENTITY:-}"
+case "$SIGNING_MODE" in
+  adhoc)
+    SIGNING_IDENTITY=-
+    echo 'Ad-hoc signing: macOS privacy permissions may need approval after each changed build.' >&2
+    ;;
+  self)
+    if [[ "$SIGNING_IDENTITY" == - ]]; then
+      echo 'Use BOOX_SIGNING=adhoc for ad-hoc signing.' >&2
+      exit 2
+    fi
+    if [[ -z "$SIGNING_IDENTITY" ]]; then
+      SIGNING_IDENTITY='BOOX Sidecar Dev'
+      if ! security find-identity 2>/dev/null | grep -qF "\"$SIGNING_IDENTITY\""; then
+        "$ROOT/scripts/create-signing-identity.sh"
+      fi
+    fi
+    ;;
+  *)
+    echo 'BOOX_SIGNING must be self or adhoc.' >&2
+    exit 2
+    ;;
+esac
 mkdir -p "$ROOT/.build/swift-module-cache" "$ROOT/.build/clang-module-cache" "$ROOT/dist"
 export CLANG_MODULE_CACHE_PATH="$ROOT/.build/clang-module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$ROOT/.build/swift-module-cache"
@@ -36,20 +60,6 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSScreenCaptureUsageDescription</key><string>Share the display you choose with your BOOX over USB or encrypted Wi-Fi.</string>
 </dict></plist>
 PLIST
-# A persistent self-signed identity keeps the code requirement stable across
-# rebuilds, so Screen Recording / Accessibility grants survive. Ad-hoc signing
-# resets them every build. Opt out with BOOX_SIGNING=adhoc.
-if [[ "${BOOX_SIGNING:-self}" == adhoc ]]; then
-  codesign --force --sign - "$APP"
-else
-  IDENTITY="${BOOX_SIGN_IDENTITY:-BOOX Sidecar Dev}"
-  if security find-identity 2>/dev/null | grep -qF "\"$IDENTITY\"" \
-     || "$ROOT/scripts/create-signing-identity.sh" >/dev/null; then
-    codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
-  else
-    echo "warning: no signing identity; using ad-hoc (TCC grants reset each rebuild)" >&2
-    codesign --force --sign - "$APP"
-  fi
-fi
+codesign --force --sign "$SIGNING_IDENTITY" --timestamp=none "$APP"
 codesign --verify --deep --strict "$APP"
 echo "Built: $APP"
