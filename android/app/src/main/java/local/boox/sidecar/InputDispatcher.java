@@ -19,6 +19,8 @@ final class InputDispatcher {
         final boolean scroll;
         final boolean rightClick;
         final double first, second;
+        final Double scrollX, scrollY;
+        final String dragPhase, dragId;
         final long createdAt;
         final int clickCount;
 
@@ -31,12 +33,28 @@ final class InputDispatcher {
         }
 
         Event(String type, double first, double second, long createdAt, int clickCount) {
+            this(type, first, second, createdAt, clickCount, null, null);
+        }
+
+        Event(String type, double first, double second, long createdAt, int clickCount, Double scrollX, Double scrollY) {
+            this(type, first, second, createdAt, clickCount, scrollX, scrollY, null, null);
+        }
+
+        Event(String type, double first, double second, long createdAt, int clickCount, Double scrollX, Double scrollY, String dragPhase, String dragId) {
             this.scroll = "scroll".equals(type);
             this.rightClick = "rightClick".equals(type);
             this.first = first;
             this.second = second;
             this.createdAt = createdAt;
             this.clickCount = clickCount;
+            this.scrollX = scrollX;
+            this.scrollY = scrollY;
+            this.dragPhase = dragPhase;
+            this.dragId = dragId;
+        }
+
+        Event scrollDelta(double delta) {
+            return new Event("scroll", delta, 0, createdAt, 1, scrollX, scrollY);
         }
     }
 
@@ -94,7 +112,27 @@ final class InputDispatcher {
         if (delta != 0) enqueue(owner, captureSession, "scroll", delta, 0, 1);
     }
 
-    private synchronized void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount) {
+    void scroll(Object owner, String captureSession, double x, double y, double delta) {
+        if (delta != 0 && Double.isFinite(x) && Double.isFinite(y) && x >= 0 && x <= 1 && y >= 0 && y <= 1)
+            enqueue(owner, captureSession, "scroll", delta, 0, 1, x, y);
+    }
+
+    void drag(Object owner, String captureSession, String phase, String dragId, double x, double y) {
+        if (!("start".equals(phase) || "move".equals(phase) || "end".equals(phase) || "cancel".equals(phase))
+                || dragId == null || !dragId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+                || !Double.isFinite(x) || !Double.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return;
+        enqueue(owner, captureSession, "drag", x, y, 1, null, null, phase, dragId);
+    }
+
+    private void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount) {
+        enqueue(owner, captureSession, type, first, second, clickCount, null, null);
+    }
+
+    private void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount, Double scrollX, Double scrollY) {
+        enqueue(owner, captureSession, type, first, second, clickCount, scrollX, scrollY, null, null);
+    }
+
+    private synchronized void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount, Double scrollX, Double scrollY, String dragPhase, String dragId) {
         if (!matches(owner, captureSession) || !Double.isFinite(first) || !Double.isFinite(second)) return;
         boolean scroll = "scroll".equals(type);
         long now = clock.getAsLong();
@@ -103,14 +141,18 @@ final class InputDispatcher {
             return;
         }
         Event tail = queue.peekLast();
-        if (scroll && tail != null && tail.scroll && Math.signum(tail.first) == Math.signum(first)) {
+        if ("move".equals(dragPhase) && tail != null && "move".equals(tail.dragPhase) && dragId.equals(tail.dragId)) {
+            queue.removeLast();
+            queue.addLast(new Event(type, first, second, tail.createdAt, clickCount, null, null, dragPhase, dragId));
+        } else if (scroll && tail != null && tail.scroll && Math.signum(tail.first) == Math.signum(first)
+                && java.util.Objects.equals(tail.scrollX, scrollX) && java.util.Objects.equals(tail.scrollY, scrollY)) {
             double accumulated = tail.first + first;
             if (!Double.isFinite(accumulated)) { pause("Too much input is waiting."); return; }
             queue.removeLast();
-            queue.addLast(new Event(true, accumulated, 0, tail.createdAt));
+            queue.addLast(tail.scrollDelta(accumulated));
         } else {
             if (queue.size() >= CAPACITY) { pause("Too much input is waiting."); return; }
-            queue.addLast(new Event(type, first, second, now, clickCount));
+            queue.addLast(new Event(type, first, second, now, clickCount, scrollX, scrollY, dragPhase, dragId));
         }
         if (!draining) {
             draining = true;
@@ -135,8 +177,8 @@ final class InputDispatcher {
                 }
                 if (event.scroll && Math.abs(event.first) > 1000) {
                     double delta = Math.copySign(1000, event.first);
-                    queue.addFirst(new Event(true, event.first - delta, 0, event.createdAt));
-                    event = new Event(true, delta, 0, event.createdAt);
+                    queue.addFirst(event.scrollDelta(event.first - delta));
+                    event = event.scrollDelta(delta);
                 }
                 target = sender;
                 capture = captureSession;

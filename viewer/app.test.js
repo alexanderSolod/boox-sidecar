@@ -49,7 +49,7 @@ function browserHarness(intercept) {
   const storage = new Map();
   const sessionStorage = { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) };
   const status = { protocol: 2, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1, capture_session: 'session-1' };
-  const window = { document, location: { hash: '', pathname: '/', search: '' }, events: {}, addEventListener(name, callback) { this.events[name] = callback; } };
+  const window = { document, crypto: require('node:crypto').webcrypto, location: { hash: '', pathname: '/', search: '' }, events: {}, addEventListener(name, callback) { this.events[name] = callback; } };
   const fetch = async (path, options) => {
     calls.push({ path, options });
     if (intercept) { const response = await intercept(path, options, status); if (response !== undefined) return response; }
@@ -446,18 +446,24 @@ function pointer(h, name, x, y, extra = {}) {
   h.element('viewport').events[name]({ target: h.element('frame'), pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y, preventDefault() {}, ...extra });
 }
 
-test('touch scroll sends movement before release and suppresses the compatibility click', async () => {
+test('two-finger scroll sends anchored movement before release without a compatibility click', async () => {
   const h = browserHarness();
   await h.connect(); h.images[0].onload(); await h.flush();
   pointer(h, 'pointerdown', 200, 100);
-  pointer(h, 'pointermove', 200, 120); await h.flush();
+  pointer(h, 'pointerdown', 240, 100, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointermove', 200, 120);
+  pointer(h, 'pointermove', 240, 120, { pointerId: 2, isPrimary: false }); await h.flush();
   let sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
-  assert.deepEqual(sent.map(event => event.deltaY), [20]);
-  pointer(h, 'pointerup', 200, 125.7);
-  h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 125.7 });
+  assert.equal(sent.reduce((sum, event) => sum + event.deltaY, 0), 20);
+  pointer(h, 'pointermove', 200, 126);
+  pointer(h, 'pointermove', 240, 126, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointerup', 200, 126);
+  pointer(h, 'pointerup', 240, 126, { pointerId: 2, isPrimary: false });
+  h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 126 });
   await h.flush();
   sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
   assert.ok(sent.every(event => event.type === 'scroll'));
+  assert.ok(sent.every(event => event.x === 0.15 && event.y === 1 / 6));
   assert.equal(sent.reduce((sum, event) => sum + event.deltaY, 0), 26);
 });
 
@@ -491,6 +497,7 @@ test('resize and multitouch cancel touch input and double-tap ownership', async 
     else pointer(h, 'pointerdown', 250, 100, { pointerId: 2, isPrimary: false });
     h.advance(1000);
     pointer(h, 'pointerup', 200, 100);
+    if (cancel === 'multitouch') pointer(h, 'pointerup', 250, 100, { pointerId: 2, isPrimary: false });
     h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100 }); await h.flush();
     assert.equal(h.calls.filter(call => call.path === '/api/input').length, 0);
     pointer(h, 'pointerdown', 200, 100); pointer(h, 'pointerup', 200, 100); await h.flush();
@@ -619,7 +626,8 @@ test('movement, geometry changes, and Mac revocation cancel a pending long press
     if (reason === 'revoked') { denied = true; await h.tick(); }
     h.advance(600); timer.callback();
     pointer(h, 'pointerup', 200, 100); await h.flush();
-    assert.equal(h.calls.filter(call => call.path === '/api/input').length, 0);
+    const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+    assert.ok(sent.every(event => event.type !== 'rightClick' && event.type !== 'tap'));
   }
 });
 
@@ -655,4 +663,167 @@ test('recognized touch and mouse double clicks reuse the first click location', 
     assert.deepEqual(sent.map(event => event.clickCount), [1, 2, 1, 1]);
     assert.deepEqual([sent[3].x, sent[3].y], [0.1875, 0.25]);
   }
+});
+
+test('one-finger and mouse drags preserve boundaries and coalesce only pending moves', async () => {
+  for (const kind of ['touch', 'mouse']) {
+    let finishStart;
+    const h = browserHarness((path, options) => {
+      if (path === '/api/input' && JSON.parse(options.body).phase === 'start') return new Promise(resolve => { finishStart = resolve; });
+    });
+    await h.connect(); h.images[0].onload(); await h.flush();
+    pointer(h, 'pointerdown', 200, 100, { pointerType: kind });
+    pointer(h, 'pointermove', 220, 120, { pointerType: kind });
+    pointer(h, 'pointermove', 300, 180, { pointerType: kind });
+    pointer(h, 'pointermove', 400, 240, { pointerType: kind });
+    pointer(h, 'pointerup', 400, 240, { pointerType: kind });
+    h.element('viewport').events.click({ target: h.element('frame'), clientX: 400, clientY: 240 });
+    await h.flush();
+    assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+    finishStart({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+    const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+    assert.deepEqual(sent.map(event => event.phase), ['start', 'move', 'end']);
+    assert.ok(sent.every(event => event.type === 'drag' && event.capture_session === 'session-1' && event.drag_id === sent[0].drag_id));
+    assert.match(sent[0].drag_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    assert.deepEqual(sent.map(event => [event.x, event.y]), [[0.125, 1 / 6], [0.375, 0.4], [0.375, 0.4]]);
+  }
+});
+
+test('a second finger cancels drag before centroid-anchored scrolling', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 200, 140); await h.flush();
+  pointer(h, 'pointerdown', 240, 140, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointermove', 200, 180);
+  pointer(h, 'pointermove', 240, 180, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointerup', 200, 180);
+  pointer(h, 'pointermove', 240, 220, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointerup', 240, 220, { pointerId: 2, isPrimary: false });
+  await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.filter(event => event.type === 'drag').map(event => event.phase), ['start', 'move', 'cancel']);
+  assert.ok(sent.findIndex(event => event.phase === 'cancel') < sent.findIndex(event => event.type === 'scroll'));
+  const scrolling = sent.filter(event => event.type === 'scroll');
+  assert.equal(scrolling.reduce((sum, event) => sum + event.deltaY, 0), 40);
+  assert.ok(scrolling.every(event => event.x === 0.15 && event.y === 140 / 600));
+  assert.ok(sent.every(event => event.type !== 'tap' && event.type !== 'rightClick'));
+});
+
+test('stationary drags renew their lease and stop heartbeats on release', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 220, 100); await h.flush();
+  const [id, timer] = [...h.timers.entries()].find(([, value]) => value.ms === 500);
+  h.timers.delete(id); h.advance(500); timer.callback(); await h.flush();
+  let sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.phase), ['start', 'move', 'move']);
+  assert.deepEqual([sent[1].x, sent[1].y], [sent[2].x, sent[2].y]);
+  pointer(h, 'pointerup', 220, 100); await h.flush();
+  assert.equal([...h.timers.values()].filter(value => value.ms === 500).length, 0);
+  sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.equal(sent.at(-1).phase, 'end');
+});
+
+test('source change cancels dispatched drag with original authority and never replays pending moves', async () => {
+  let finishStart, capture = 'session-1';
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status') status.capture_session = capture;
+    if (path === '/api/input' && JSON.parse(options.body).phase === 'start') return new Promise(resolve => { finishStart = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 220, 100);
+  pointer(h, 'pointermove', 240, 100);
+  const start = h.calls.find(call => call.path === '/api/input');
+  capture = 'session-2'; await h.tick();
+  assert.equal(start.options.signal.aborted, true);
+  finishStart({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  pointer(h, 'pointerup', 240, 100); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.phase), ['start', 'cancel']);
+  assert.ok(sent.every(event => event.capture_session === 'session-1'));
+  assert.equal(sent[1].drag_id, sent[0].drag_id);
+});
+
+test('drag queue expiry retains move age and sends cancellation instead of stale movement', async () => {
+  let finishStart;
+  const h = browserHarness((path, options) => {
+    if (path === '/api/input' && JSON.parse(options.body).phase === 'start') return new Promise(resolve => { finishStart = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 220, 100);
+  h.advance(1900);
+  pointer(h, 'pointermove', 240, 100);
+  h.advance(100);
+  finishStart({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.phase), ['start', 'cancel']);
+  assert.equal(h.element('resumeInput').hidden, false);
+  assert.match(h.element('notice').textContent, /waited too long/);
+});
+
+test('wheel events at different targets never coalesce their anchors', async () => {
+  let finishFirst;
+  const h = browserHarness(path => {
+    if (path === '/api/input' && !finishFirst) return new Promise(resolve => { finishFirst = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  const wheel = x => h.element('viewport').events.wheel({ target: h.element('frame'), clientX: x, clientY: 100, deltaY: 30, deltaMode: 0, preventDefault() {} });
+  wheel(200); wheel(200); wheel(300);
+  finishFirst({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => [event.x, event.y, event.deltaY]), [[0.125, 1 / 6, -30], [0.125, 1 / 6, -30], [0.25, 1 / 6, -30]]);
+});
+
+test('drag coordinates clamp to the image and letterbox starts stay ignored', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 50, 100);
+  pointer(h, 'pointermove', 200, 100); pointer(h, 'pointerup', 200, 100); await h.flush();
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, 0);
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 950, 650);
+  pointer(h, 'pointerup', 950, 650); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.phase), ['start', 'move', 'end']);
+  assert.deepEqual([sent.at(-1).x, sent.at(-1).y], [1, 1]);
+});
+
+test('drag overload pauses input and attempts cancellation without replaying discrete events', async () => {
+  let finishStart;
+  const h = browserHarness((path, options) => {
+    if (path === '/api/input' && JSON.parse(options.body).phase === 'start') return new Promise(resolve => { finishStart = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 220, 100);
+  for (let index = 0; index < 70; index++) h.element(index % 2 ? 'scrollUp' : 'scrollDown').events.click();
+  await h.flush();
+  assert.equal(h.element('resumeInput').hidden, false);
+  finishStart({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  pointer(h, 'pointerup', 220, 100); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.phase), ['start', 'cancel']);
+});
+
+test('a third touch stops scrolling and cannot turn remaining touches into taps or drags', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointerdown', 240, 100, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointermove', 200, 140); await h.flush();
+  const before = h.calls.filter(call => call.path === '/api/input').length;
+  pointer(h, 'pointerdown', 280, 100, { pointerId: 3, isPrimary: false });
+  pointer(h, 'pointermove', 200, 180);
+  pointer(h, 'pointerup', 200, 180);
+  pointer(h, 'pointerup', 240, 100, { pointerId: 2, isPrimary: false });
+  pointer(h, 'pointerup', 280, 100, { pointerId: 3, isPrimary: false }); await h.flush();
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, before);
+  pointer(h, 'pointerdown', 200, 100); pointer(h, 'pointerup', 200, 100); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.equal(sent.at(-1).type, 'tap');
+  assert.equal(sent.at(-1).clickCount, 1);
 });

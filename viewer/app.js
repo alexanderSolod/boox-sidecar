@@ -23,6 +23,7 @@
   var initialized = false, knownDisplays = [], cancelDecode = null;
   var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '', inputPaused = false, pausedCapture = '';
   var touchGesture = null, lastTouchTap = null, ignoreClickUntil = 0, suppressTouchClick = false, wheelRemainder = 0, longPressTimer = null, lastPointerKind = 'mouse';
+  var pointers = new Map(), scrollGesture = null, pointersBlocked = false, dragTimer = null, remoteDrag = null, cleanupRequest = null, wheelPoint = null;
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
@@ -232,12 +233,26 @@
     finally { if (run === generation) { pendingSettings = false; updateControls(); } }
   }
   function clearInput() {
+    var abandoned = remoteDrag;
+    remoteDrag = null;
     inputEpoch += 1; inputQueue = []; inputDraining = false;
     clearTimeout(longPressTimer); longPressTimer = null;
+    clearTimeout(dragTimer); dragTimer = null;
     if (touchGesture) suppressTouchClick = true;
     touchGesture = null; lastTouchTap = null; wheelRemainder = 0;
+    scrollGesture = null; pointers.clear(); pointersBlocked = false; wheelPoint = null;
     if (inputRequest) inputRequest.abort();
     inputRequest = null;
+    if (abandoned) cancelRemoteDrag(abandoned);
+  }
+  function cancelRemoteDrag(drag) {
+    if (cleanupRequest) cleanupRequest.abort();
+    var controller = new AbortController(); cleanupRequest = controller;
+    var timeout = setTimeout(function () { controller.abort(); }, 1000);
+    fetch('/api/input', { method: 'POST', cache: 'no-store', credentials: 'omit', keepalive: true, signal: controller.signal,
+      headers: { Authorization: 'Bearer ' + drag.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({}, drag.payload, { phase: 'cancel' }))
+    }).catch(function () {}).finally(function () { clearTimeout(timeout); if (cleanupRequest === controller) cleanupRequest = null; });
   }
   function pauseInput(reason) {
     clearInput(); inputPaused = true; pausedCapture = status ? status.capture_session : '';
@@ -250,8 +265,10 @@
     payload = Object.assign({}, payload, { capture_session: status.capture_session });
     var now = inputTime(), tail = inputQueue[inputQueue.length - 1];
     if (inputQueue.length && now - inputQueue[0].createdAt >= 2000) { pauseInput('Input waited too long.'); return; }
-    if (payload.type === 'scroll' && tail && tail.payload.type === 'scroll' && Math.sign(tail.payload.deltaY) === Math.sign(payload.deltaY)) {
+    if (payload.type === 'scroll' && tail && tail.payload.type === 'scroll' && tail.payload.x === payload.x && tail.payload.y === payload.y && Math.sign(tail.payload.deltaY) === Math.sign(payload.deltaY)) {
       tail.payload.deltaY += payload.deltaY;
+    } else if (payload.type === 'drag' && payload.phase === 'move' && tail && tail.payload.type === 'drag' && tail.payload.phase === 'move' && tail.payload.drag_id === payload.drag_id) {
+      tail.payload = payload;
     } else {
       if (inputQueue.length >= 64) { pauseInput('Too much input is waiting.'); return; }
       inputQueue.push({ payload: payload, createdAt: now });
@@ -267,6 +284,7 @@
         inputQueue.unshift({ payload: Object.assign({}, payload, { deltaY: payload.deltaY - delta }), createdAt: next.createdAt });
         payload = Object.assign({}, payload, { deltaY: delta });
       }
+      if (payload.type === 'drag' && (payload.phase === 'start' || payload.phase === 'move')) remoteDrag = { payload: payload, token: token };
       inputRequest = new AbortController();
       try { await request('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run, inputRequest.signal); }
       catch (error) {
@@ -276,41 +294,98 @@
         return;
       }
       if (run !== generation || epoch !== inputEpoch) return;
+      if (payload.type === 'drag' && (payload.phase === 'end' || payload.phase === 'cancel') && remoteDrag && remoteDrag.payload.drag_id === payload.drag_id) remoteDrag = null;
       inputRequest = null;
     }
     if (epoch === inputEpoch) inputDraining = false;
   }
   function inputReady() { return !!(active && initialized && !pendingSettings && frameID >= 0 && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0); }
   function controlling() { return inputReady() && !inputPaused; }
-  function cancelTouch() { clearTimeout(longPressTimer); longPressTimer = null; touchGesture = null; lastTouchTap = null; suppressTouchClick = true; ignoreClickUntil = inputTime() + 500; }
+  function dragPoint(rect, x, y) {
+    return normalizedPoint(rect, Math.max(rect.left, Math.min(rect.left + rect.width, x)), Math.max(rect.top, Math.min(rect.top + rect.height, y)));
+  }
+  function sameGeometry(rect) {
+    var current = frame.getBoundingClientRect();
+    return current.left === rect.left && current.top === rect.top && current.width === rect.width && current.height === rect.height;
+  }
+  function dragID() {
+    if (root.crypto.randomUUID) return root.crypto.randomUUID();
+    var bytes = root.crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+    var hex = Array.from(bytes, function (value) { return value.toString(16).padStart(2, '0'); }).join('');
+    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+  }
+  function dragInput(gesture, phase, point) {
+    input({ type: 'drag', phase: phase, drag_id: gesture.dragID, x: point.x, y: point.y });
+  }
+  function finishDrag(phase) {
+    clearTimeout(dragTimer); dragTimer = null;
+    if (!touchGesture || !touchGesture.dragID) return;
+    var gesture = touchGesture;
+    if (controlling()) dragInput(gesture, phase, gesture.point);
+    else if (remoteDrag) { var abandoned = remoteDrag; remoteDrag = null; cancelRemoteDrag(abandoned); }
+    gesture.dragID = null;
+  }
+  function heartbeat(gesture) {
+    dragTimer = setTimeout(function () {
+      dragTimer = null;
+      if (touchGesture !== gesture || !gesture.dragID || gesture.epoch !== inputEpoch) return;
+      if (!controlling() || !sameGeometry(gesture.rect)) { cancelTouch(); return; }
+      dragInput(gesture, 'move', gesture.point);
+      if (touchGesture === gesture && gesture.dragID && gesture.epoch === inputEpoch) heartbeat(gesture);
+    }, 500);
+  }
+  function cancelTouch() {
+    finishDrag('cancel');
+    clearTimeout(longPressTimer); longPressTimer = null;
+    touchGesture = null; scrollGesture = null; lastTouchTap = null; pointersBlocked = pointers.size > 0;
+    suppressTouchClick = true; ignoreClickUntil = inputTime() + 500;
+  }
   function longPress(gesture) {
     longPressTimer = null;
-    if (touchGesture !== gesture || gesture.kind === 'mouse' || gesture.longPressed || gesture.scrolling || gesture.moved || !controlling() || gesture.epoch !== inputEpoch) return;
-    var rect = frame.getBoundingClientRect();
-    if (rect.left !== gesture.rect.left || rect.top !== gesture.rect.top || rect.width !== gesture.rect.width || rect.height !== gesture.rect.height) { cancelTouch(); return; }
-    var point = normalizedPoint(rect, gesture.x, gesture.y);
+    if (touchGesture !== gesture || gesture.kind === 'mouse' || gesture.longPressed || gesture.dragID || gesture.moved || !controlling() || gesture.epoch !== inputEpoch) return;
+    if (!sameGeometry(gesture.rect)) { cancelTouch(); return; }
+    var point = normalizedPoint(gesture.rect, gesture.x, gesture.y);
     if (!point) return;
     gesture.longPressed = true; lastTouchTap = null;
     input({ type: 'rightClick', x: point.x, y: point.y });
   }
+  function centroid() {
+    var values = Array.from(pointers.values());
+    return { x: (values[0].x + values[1].x) / 2, y: (values[0].y + values[1].y) / 2 };
+  }
   function moveTouch(event) {
-    var gesture = touchGesture;
-    if (!gesture || gesture.id !== event.pointerId) return;
-    var rect = frame.getBoundingClientRect();
-    if (!controlling() || gesture.epoch !== inputEpoch || rect.left !== gesture.rect.left || rect.top !== gesture.rect.top || rect.width !== gesture.rect.width || rect.height !== gesture.rect.height) { cancelTouch(); return; }
-    if (gesture.longPressed) { event.preventDefault(); return; }
-    if (Math.abs(event.clientX - gesture.x) > 8) { gesture.moved = true; lastTouchTap = null; }
-    if (Math.abs(event.clientY - gesture.y) > 8) {
-      if (gesture.kind === 'mouse') gesture.moved = true;
-      else gesture.scrolling = true;
-      lastTouchTap = null;
-    }
-    if (gesture.scrolling || gesture.moved) { clearTimeout(longPressTimer); longPressTimer = null; }
-    if (gesture.scrolling) {
-      gesture.remainder += event.clientY - gesture.lastY;
-      gesture.lastY = event.clientY;
-      var delta = Math.trunc(gesture.remainder); gesture.remainder -= delta;
-      if (delta) input({ type: 'scroll', deltaY: delta });
+    var pointer = pointers.get(event.pointerId);
+    if (!pointer) return;
+    pointer.x = event.clientX; pointer.y = event.clientY;
+    if (pointersBlocked) return;
+    var gesture = scrollGesture || touchGesture;
+    if (!gesture) return;
+    if (!controlling() || gesture.epoch !== inputEpoch || !sameGeometry(gesture.rect)) { cancelTouch(); return; }
+    if (scrollGesture) {
+      if (pointers.size !== 2) { cancelTouch(); return; }
+      var center = centroid();
+      if (!gesture.moved && Math.abs(center.y - gesture.y) > 8) gesture.moved = true;
+      if (gesture.moved) {
+        gesture.remainder += center.y - gesture.lastY; gesture.lastY = center.y;
+        var delta = Math.trunc(gesture.remainder); gesture.remainder -= delta;
+        if (delta) input({ type: 'scroll', deltaY: delta, x: gesture.point.x, y: gesture.point.y });
+      }
+    } else {
+      if (gesture.id !== event.pointerId || gesture.longPressed) { event.preventDefault(); return; }
+      if (Math.abs(event.clientX - gesture.x) > 8 || Math.abs(event.clientY - gesture.y) > 8) gesture.moved = true;
+      if (gesture.moved) {
+        clearTimeout(longPressTimer); longPressTimer = null; lastTouchTap = null;
+        if (!gesture.dragID) {
+          if (!root.crypto) { pauseInput('Drag is unavailable in this browser.'); return; }
+          gesture.dragID = dragID();
+          dragInput(gesture, 'start', gesture.point);
+          if (touchGesture !== gesture || gesture.epoch !== inputEpoch) return;
+          heartbeat(gesture);
+        }
+        gesture.point = dragPoint(gesture.rect, event.clientX, event.clientY);
+        dragInput(gesture, 'move', gesture.point);
+      }
     }
     event.preventDefault();
   }
@@ -335,40 +410,63 @@
   $('viewport').addEventListener('wheel', function (event) {
     if (!controlling() || event.target !== frame) return;
     var rect = frame.getBoundingClientRect();
-    if (!normalizedPoint(rect, event.clientX, event.clientY)) return;
+    var point = normalizedPoint(rect, event.clientX, event.clientY);
+    if (!point) return;
     var scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
     if (!Number.isFinite(event.deltaY)) return;
+    if (!wheelPoint || wheelPoint.x !== point.x || wheelPoint.y !== point.y) wheelRemainder = 0;
+    wheelPoint = point;
     wheelRemainder -= event.deltaY * scale;
     var delta = Math.trunc(wheelRemainder); wheelRemainder -= delta;
-    if (delta) input({ type: 'scroll', deltaY: delta });
+    if (delta) input({ type: 'scroll', deltaY: delta, x: point.x, y: point.y });
     event.preventDefault();
   }, { passive: false });
   $('viewport').addEventListener('pointerdown', function (event) {
     var kind = event.pointerType || 'mouse';
     lastPointerKind = kind;
     if (kind === 'mouse' && event.button != null && event.button !== 0) return;
-    if (event.isPrimary === false || touchGesture) { cancelTouch(); return; }
-    if (!controlling() || event.target !== frame) return;
+    if (!controlling()) return;
+    if (!pointers.size && (event.isPrimary === false || event.target !== frame)) return;
     var rect = frame.getBoundingClientRect();
-    if (!normalizedPoint(rect, event.clientX, event.clientY)) return;
-    suppressTouchClick = true;
-    touchGesture = { id: event.pointerId, kind: kind, epoch: inputEpoch, rect: rect, x: event.clientX, y: event.clientY, lastY: event.clientY, downAt: inputTime(), remainder: 0, scrolling: false, moved: false, longPressed: false };
-    if (kind !== 'mouse') { var gesture = touchGesture; longPressTimer = setTimeout(function () { longPress(gesture); }, 500); }
+    var point = normalizedPoint(rect, event.clientX, event.clientY);
+    if (!point && !pointers.size) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY, kind: kind });
     if ($('viewport').setPointerCapture) $('viewport').setPointerCapture(event.pointerId);
+    suppressTouchClick = true;
+    if (pointersBlocked || !point || pointers.size > 2 || (pointers.size === 2 && Array.from(pointers.values()).some(function (pointer) { return pointer.kind !== 'touch'; }))) { cancelTouch(); event.preventDefault(); return; }
+    if (pointers.size === 2) {
+      finishDrag('cancel');
+      if (pointers.size !== 2 || !controlling()) return;
+      clearTimeout(longPressTimer); longPressTimer = null;
+      touchGesture = null; lastTouchTap = null;
+      var center = centroid();
+      scrollGesture = { epoch: inputEpoch, rect: rect, y: center.y, lastY: center.y, point: normalizedPoint(rect, center.x, center.y), remainder: 0, moved: false };
+      event.preventDefault(); return;
+    }
+    touchGesture = { id: event.pointerId, kind: kind, epoch: inputEpoch, rect: rect, x: event.clientX, y: event.clientY, point: point, downAt: inputTime(), dragID: null, moved: false, longPressed: false };
+    if (kind !== 'mouse') { var gesture = touchGesture; longPressTimer = setTimeout(function () { longPress(gesture); }, 500); }
     event.preventDefault();
   });
   $('viewport').addEventListener('pointermove', moveTouch);
   $('viewport').addEventListener('pointerup', function (event) {
     moveTouch(event);
+    pointers.delete(event.pointerId);
+    if (scrollGesture) {
+      if (scrollGesture.moved && Math.abs(scrollGesture.remainder) >= 0.5) input({ type: 'scroll', deltaY: Math.sign(scrollGesture.remainder), x: scrollGesture.point.x, y: scrollGesture.point.y });
+      scrollGesture = null; lastTouchTap = null; pointersBlocked = pointers.size > 0;
+      ignoreClickUntil = inputTime() + 500;
+      return;
+    }
+    if (pointersBlocked) { if (!pointers.size) pointersBlocked = false; return; }
     var gesture = touchGesture;
     if (!gesture || gesture.id !== event.pointerId) return;
     clearTimeout(longPressTimer); longPressTimer = null;
+    if (gesture.dragID) { finishDrag('end'); touchGesture = null; ignoreClickUntil = inputTime() + 500; return; }
     if (gesture.kind !== 'mouse' && inputTime() - gesture.downAt >= 500) longPress(gesture);
     touchGesture = null; ignoreClickUntil = inputTime() + 500;
     if (gesture.longPressed) return;
     var point = normalizedPoint(gesture.rect, event.clientX, event.clientY);
-    if (gesture.scrolling && Math.abs(gesture.remainder) >= 0.5) input({ type: 'scroll', deltaY: Math.sign(gesture.remainder) });
-    if (!gesture.scrolling && !gesture.moved && point) {
+    if (!gesture.moved && point) {
       var quick = inputTime() - gesture.downAt < 500;
       var twice = quick && lastTouchTap && lastTouchTap.kind === gesture.kind && gesture.downAt - lastTouchTap.time <= (gesture.kind === 'mouse' ? 500 : 300)
         && Math.hypot(gesture.x - lastTouchTap.x, gesture.y - lastTouchTap.y) <= (gesture.kind === 'mouse' ? 5 : 30);
@@ -377,8 +475,8 @@
       input({ type: 'tap', x: point.x, y: point.y, clickCount: twice ? 2 : 1 });
     } else lastTouchTap = null;
   });
-  $('viewport').addEventListener('pointercancel', cancelTouch);
-  $('viewport').addEventListener('lostpointercapture', function () { if (touchGesture) cancelTouch(); });
+  $('viewport').addEventListener('pointercancel', function (event) { pointers.delete(event.pointerId); cancelTouch(); });
+  $('viewport').addEventListener('lostpointercapture', function (event) { if (pointers.has(event.pointerId)) { pointers.delete(event.pointerId); cancelTouch(); } });
   $('viewport').addEventListener('contextmenu', function (event) {
     if (!controlling()) return;
     var point = normalizedPoint(frame.getBoundingClientRect(), event.clientX, event.clientY);

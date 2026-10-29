@@ -17,7 +17,8 @@ final class FrameView extends View {
     interface InputListener {
         void tap(String captureSession, double x, double y, int clickCount);
         void rightClick(String captureSession, double x, double y);
-        void scroll(String captureSession, double delta);
+        void scroll(String captureSession, double x, double y, double delta);
+        void drag(String captureSession, String phase, String dragId, double x, double y);
     }
     private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF imageBounds = new RectF();
@@ -30,6 +31,7 @@ final class FrameView extends View {
     private boolean inputEnabled;
     private InputListener listener;
     private final Runnable longPress = this::checkLongPress;
+    private final Runnable dragHeartbeat = this::keepDragAlive;
 
     FrameView(Context context) {
         super(context);
@@ -39,19 +41,22 @@ final class FrameView extends View {
             @Override public void tap(String capture, double x, double y, int count) {
                 if (inputEnabled && listener != null) listener.tap(capture, x, y, count);
             }
-            @Override public void scroll(String capture, double delta) {
-                if (inputEnabled && listener != null) listener.scroll(capture, delta);
+            @Override public void scroll(String capture, double x, double y, double delta) {
+                if (inputEnabled && listener != null) listener.scroll(capture, x, y, delta);
             }
             @Override public void rightClick(String capture, double x, double y) {
                 if (inputEnabled && listener != null) listener.rightClick(capture, x, y);
             }
+            @Override public void drag(String capture, String phase, String dragId, double x, double y) {
+                if (inputEnabled && listener != null) listener.drag(capture, phase, dragId, x, y);
+            }
         });
         setBackgroundColor(Color.WHITE);
-        setContentDescription("Mac display. Enable input on the Mac to tap, scroll, or hold for right-click.");
+        setContentDescription("Mac display. Enable input on the Mac to tap, drag with one finger, scroll with two fingers, or hold for right-click.");
     }
 
     void setFrame(Bitmap frame, int session, String captureSession) {
-        if (bitmap != null && (bitmap.getWidth() != frame.getWidth() || bitmap.getHeight() != frame.getHeight())) { removeCallbacks(longPress); gesture.clear(); }
+        if (bitmap != null && (bitmap.getWidth() != frame.getWidth() || bitmap.getHeight() != frame.getHeight())) { cancelTimers(); gesture.clear(); }
         bitmap = frame;
         currentSession = session;
         frameCaptureSession = captureSession;
@@ -63,20 +68,20 @@ final class FrameView extends View {
         frameCaptureSession = "";
         drawnCaptureSession = "";
         gesture.clear();
-        removeCallbacks(longPress);
+        cancelTimers();
         imageBounds.setEmpty();
         invalidate();
     }
     void setInput(boolean enabled, InputListener listener) {
         inputEnabled = enabled;
         this.listener = listener;
-        if (!enabled) { removeCallbacks(longPress); gesture.cancel(); }
+        if (!enabled) { cancelTimers(); gesture.cancel(); }
     }
 
     @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         gesture.clear();
-        removeCallbacks(longPress);
+        cancelTimers();
         drawnCaptureSession = "";
     }
 
@@ -100,21 +105,41 @@ final class FrameView extends View {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!inputEnabled || listener == null || drawnCaptureSession.isEmpty()) return false;
-        if (event.getPointerCount() != 1) { removeCallbacks(longPress); gesture.cancel(); return true; }
+        if (event.getPointerCount() > 2) { cancelTimers(); gesture.cancel(); return true; }
+        if (event.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN) {
+            cancelTimers();
+            if (event.getPointerCount() == 2 && imageBounds.contains(event.getX(0), event.getY(0))
+                    && imageBounds.contains(event.getX(1), event.getY(1))) {
+                gesture.startScroll((event.getX(0) + event.getX(1)) / 2, (event.getY(0) + event.getY(1)) / 2);
+            } else gesture.cancel();
+            return true;
+        }
+        if (event.getActionMasked() == MotionEvent.ACTION_POINTER_UP) {
+            cancelTimers();
+            if (event.getPointerCount() == 2) gesture.up((event.getX(0) + event.getX(1)) / 2,
+                    (event.getY(0) + event.getY(1)) / 2, event.getEventTime());
+            else gesture.cancel();
+            return true;
+        }
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            removeCallbacks(longPress);
+            cancelTimers();
             boolean accepted = gesture.down(event.getX(), event.getY(), event.getEventTime());
             if (accepted) postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
             return accepted;
         }
         if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             gesture.cancel();
-            removeCallbacks(longPress);
+            cancelTimers();
             return true;
         }
-        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) gesture.move(event.getX(), event.getY());
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            if (event.getPointerCount() == 2) gesture.move((event.getX(0) + event.getX(1)) / 2, (event.getY(0) + event.getY(1)) / 2);
+            else gesture.move(event.getX(), event.getY());
+            removeCallbacks(dragHeartbeat);
+            if (gesture.dragging()) { removeCallbacks(longPress); postDelayed(dragHeartbeat, 500); }
+        }
         if (event.getActionMasked() == MotionEvent.ACTION_UP) {
-            removeCallbacks(longPress);
+            cancelTimers();
             if (gesture.up(event.getX(), event.getY(), event.getEventTime())) performClick();
             return true;
         }
@@ -127,8 +152,20 @@ final class FrameView extends View {
         if (inputEnabled) gesture.longPress(SystemClock.uptimeMillis());
     }
 
-    @Override protected void onDetachedFromWindow() {
+    private void keepDragAlive() {
+        if (inputEnabled && gesture.dragging()) {
+            gesture.heartbeat();
+            postDelayed(dragHeartbeat, 500);
+        }
+    }
+
+    private void cancelTimers() {
         removeCallbacks(longPress);
+        removeCallbacks(dragHeartbeat);
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        cancelTimers();
         gesture.cancel();
         super.onDetachedFromWindow();
     }

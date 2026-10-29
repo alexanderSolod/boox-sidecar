@@ -542,7 +542,13 @@ public final class MainActivity extends Activity {
                 inputDispatcher.activate(owner, capture, new InputDispatcher.Sender() {
                     @Override public void send(InputDispatcher.Event event, String authority) throws Exception {
                         JSONObject payload = new JSONObject().put("capture_session", authority);
-                        if (event.scroll) payload.put("type", "scroll").put("deltaY", event.first);
+                        if (event.dragPhase != null) {
+                            payload.put("type", "drag").put("phase", event.dragPhase).put("drag_id", event.dragId)
+                                    .put("x", event.first).put("y", event.second);
+                        } else if (event.scroll) {
+                            payload.put("type", "scroll").put("deltaY", event.first);
+                            if (event.scrollX != null) payload.put("x", event.scrollX).put("y", event.scrollY);
+                        }
                         else {
                             payload.put("type", event.rightClick ? "rightClick" : "tap").put("x", event.first).put("y", event.second);
                             if (!event.rightClick) payload.put("clickCount", event.clickCount);
@@ -572,7 +578,8 @@ public final class MainActivity extends Activity {
         frameView.setInput(enabled, new FrameView.InputListener() {
             @Override public void tap(String authority, double x, double y, int clickCount) { inputDispatcher.tap(owner, authority, x, y, clickCount); }
             @Override public void rightClick(String authority, double x, double y) { inputDispatcher.rightClick(owner, authority, x, y); }
-            @Override public void scroll(String authority, double delta) { inputDispatcher.scroll(owner, authority, delta); }
+            @Override public void drag(String authority, String phase, String dragId, double x, double y) { inputDispatcher.drag(owner, authority, phase, dragId, x, y); }
+            @Override public void scroll(String authority, double x, double y, double delta) { inputDispatcher.scroll(owner, authority, x, y, delta); }
         });
     }
 

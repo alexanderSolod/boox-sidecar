@@ -12,7 +12,54 @@ public final class InputDispatcherTest {
         orderedInput();
         boundsAndFailure();
         obsoleteOwnership();
+        anchoredScrollAndDrag();
         System.out.println(checks + " ordered input checks passed.");
+    }
+
+    private static void anchoredScrollAndDrag() {
+        Fixture f = new Fixture();
+        f.dispatcher.scroll(f.owner, "capture", 0.1, 0.2, 800);
+        f.dispatcher.scroll(f.owner, "capture", 0.1, 0.2, 800);
+        f.dispatcher.scroll(f.owner, "capture", 0.8, 0.2, 500);
+        f.dispatcher.scroll(f.owner, "capture", 20);
+        f.dispatcher.scroll(f.owner, "capture", 0.8, 0.2, 50);
+        f.dispatcher.scroll(f.owner, "capture", 0.8, 0.3, 30);
+        f.dispatcher.scroll(f.owner, "capture", -0.1, 0.2, 10);
+        f.executor.run();
+        check(f.sender.events.size() == 6);
+        check(f.sender.events.get(0).first == 1000 && f.sender.events.get(1).first == 600);
+        check(f.sender.events.get(0).scrollX == 0.1 && f.sender.events.get(1).scrollY == 0.2);
+        check(f.sender.events.get(2).scrollX == 0.8 && f.sender.events.get(2).first == 500);
+        check(f.sender.events.get(3).scrollX == null && f.sender.events.get(3).first == 20);
+        check(f.sender.events.get(4).first == 50 && f.sender.events.get(5).first == 30);
+
+        Fixture drag = new Fixture();
+        String id = "00000000-0000-0000-0000-000000000001";
+        drag.dispatcher.drag(drag.owner, "capture", "start", id, 0.1, 0.2);
+        drag.dispatcher.drag(drag.owner, "capture", "move", id, 0.2, 0.3);
+        drag.dispatcher.drag(drag.owner, "capture", "move", id, 0.3, 0.4);
+        drag.dispatcher.drag(drag.owner, "capture", "end", id, 0.3, 0.4);
+        drag.dispatcher.drag(drag.owner, "capture", "cancel", id, 0.3, 0.4);
+        drag.executor.run();
+        check(drag.sender.events.size() == 4);
+        check(drag.sender.events.get(0).dragPhase.equals("start"));
+        check(drag.sender.events.get(1).dragPhase.equals("move") && drag.sender.events.get(1).first == 0.3);
+        check(drag.sender.events.get(2).dragPhase.equals("end") && drag.sender.events.get(3).dragPhase.equals("cancel"));
+        check(drag.sender.events.stream().allMatch(event -> id.equals(event.dragId)));
+
+        Fixture stale = new Fixture();
+        stale.dispatcher.drag(stale.owner, "capture", "move", id, 0.1, 0.2);
+        stale.now[0] = 1900;
+        stale.dispatcher.drag(stale.owner, "capture", "move", id, 0.2, 0.3);
+        stale.now[0] = 2000;
+        stale.executor.run();
+        check(stale.sender.events.isEmpty() && stale.pauses.size() == 1);
+
+        Fixture cancelled = new Fixture();
+        cancelled.dispatcher.drag(cancelled.owner, "capture", "start", id, 0.1, 0.2);
+        cancelled.dispatcher.stop();
+        cancelled.executor.run();
+        check(cancelled.sender.events.isEmpty());
     }
 
     private static void orderedInput() {
