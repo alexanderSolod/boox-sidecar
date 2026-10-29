@@ -29,6 +29,7 @@ if [[ "$suite" == all || "$suite" == mac ]]; then
 fi
 if [[ "$suite" == all || "$suite" == android ]]; then
     sh android/tests/run-native-client-tests.sh
+    sh android/tests/run-socket-tests.sh
     sh android/build.sh :app:lintDebug
 fi
 echo "PASS: requested $suite checks"

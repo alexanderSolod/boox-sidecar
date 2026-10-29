@@ -16,3 +16,11 @@ swiftc -module-cache-path "$work/module-cache" \
     "$root/macos/Sources/BooxSidecar/VirtualDisplayPlacement.swift" \
     "$root/macos/Tests/VirtualDisplayPlacementTests.swift" -o "$work/placement"
 "$work/placement"
+swiftc -module-cache-path "$work/module-cache" \
+    "$root/macos/Sources/BooxSidecar/PairingCredential.swift" \
+    "$root/macos/Sources/BooxSidecar/HostIdentity.swift" \
+    "$root/macos/Sources/BooxSidecar/TLSIdentity.swift" \
+    "$root/macos/Sources/BooxSidecar/SharingAuthority.swift" \
+    "$root/macos/Sources/BooxSidecar/HTTPServer.swift" \
+    "$root/macos/Tests/SecurityIntegrationTests.swift" -o "$work/security"
+"$work/security"
