@@ -44,9 +44,10 @@ public final class MainActivity extends Activity {
     private static final String USB = AutoRoutePolicy.USB;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
+    private final ScheduledThreadPoolExecutor inputWorker = new ScheduledThreadPoolExecutor(1);
+    private final InputDispatcher inputDispatcher = new InputDispatcher(inputWorker, SystemClock::elapsedRealtime, this::pauseRemoteInput);
     private final SessionRouter router = new SessionRouter(worker);
     private final SessionCoordinator<PinnedClient> sessions = new SessionCoordinator<>();
-    private final AtomicReference<JSONObject> pendingInput = new AtomicReference<>();
     private final AtomicReference<JSONObject> pendingSettings = new AtomicReference<>();
     private final AtomicReference<PendingFrame> pendingFrame = new AtomicReference<>();
     private final BooxRefresh refresh = new BooxRefresh();
@@ -73,9 +74,12 @@ public final class MainActivity extends Activity {
     private ConnectivityManager.NetworkCallback networkCallback;
     private BroadcastReceiver powerReceiver;
     private CheckBox colorControl;
+    private CheckBox inputControl;
     private boolean updatingControls;
     private volatile PinnedClient client;
-    private boolean remoteInputRequested;
+    private volatile SessionRouter.Pairing routePairing;
+    private volatile boolean remoteInputRequested;
+    private volatile String inputMessage = "";
     private boolean fullscreen = true;
     private long lastFrameID = -1;
     private long nextStatusAt;
@@ -167,9 +171,11 @@ public final class MainActivity extends Activity {
         });
         second.addView(colorToggle);
         CheckBox inputToggle = new CheckBox(this);
+        inputControl = inputToggle;
         inputToggle.setText("Remote input");
         inputToggle.setOnCheckedChangeListener((button, checked) -> {
             remoteInputRequested = checked;
+            if (checked) inputMessage = "";
             updateFrameInput();
         });
         second.addView(inputToggle);
@@ -318,13 +324,14 @@ public final class MainActivity extends Activity {
         PinnedClient old = client;
         client = route.client;
         routeEndpoint = route.endpoint;
+        routePairing = pairing;
         if (old != null && old != client) old.cancel();
         lastFrameID = -1;
         nextStatusAt = 0;
         measurementStart = SystemClock.elapsedRealtime();
         receivedFrames = 0;
         router.activated(session);
-        pendingInput.set(null);
+        inputDispatcher.stop();
         PendingFrame discard = pendingFrame.getAndSet(null);
         if (discard != null) discard.bitmap.recycle();
         if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
@@ -361,8 +368,9 @@ public final class MainActivity extends Activity {
         PinnedClient previous = client;
         client = null;
         routeEndpoint = "";
+        routePairing = null;
         if (previous != null) previous.cancel();
-        pendingInput.set(null);
+        inputDispatcher.stop();
         pendingSettings.set(null);
         PendingFrame previousFrame = pendingFrame.getAndSet(null);
         if (previousFrame != null) previousFrame.bitmap.recycle();
@@ -392,11 +400,6 @@ public final class MainActivity extends Activity {
                 }
             }
             if (!isCurrent(session) || !sessions.owns(session, connection)) return;
-            JSONObject input = pendingInput.getAndSet(null);
-            if (input != null && sessions.captureReady() && sessions.acceptsCapture(input.optString("capture_session", ""))) {
-                try { connection.json("/api/input", input); }
-                catch (Exception exception) { postStatus(session, connection, exception.getMessage(), true); }
-            }
             if (started >= nextStatusAt) {
                 JSONObject result = connection.json("/api/status", null);
                 synchronized (this) {
@@ -474,6 +477,8 @@ public final class MainActivity extends Activity {
         connection.cancel();
         client = null;
         routeEndpoint = "";
+        routePairing = null;
+        inputDispatcher.stop();
         ui.post(() -> {
             synchronized (MainActivity.this) {
                 if (!isCurrent(session) || client != null) return;
@@ -499,7 +504,7 @@ public final class MainActivity extends Activity {
         boolean changed = sessions.updateCapture(session, owner, ready, reportedSession, asleep);
         if (!sessions.captureReady() || changed) {
             lastFrameID = -1;
-            pendingInput.set(null);
+            inputDispatcher.stop();
             PendingFrame discarded = pendingFrame.getAndSet(null);
             if (discarded != null) discarded.bitmap.recycle();
         }
@@ -515,10 +520,48 @@ public final class MainActivity extends Activity {
         });
     }
 
-    private void updateFrameInput() {
-        frameView.setInput(remoteInputRequested && sessions.captureReady(), new FrameView.InputListener() {
-            @Override public void tap(String authority, double x, double y) { queueInput(authority, "tap", x, y); }
-            @Override public void scroll(String authority, double delta) { queueInput(authority, "scroll", delta, 0); }
+    private synchronized void updateFrameInput() {
+        PinnedClient owner = client;
+        String capture = sessions.captureSession();
+        SessionRouter.Pairing pairing = routePairing;
+        boolean enabled = resumed && remoteInputRequested && sessions.captureReady() && owner != null && pairing != null;
+        if (!enabled) inputDispatcher.stop();
+        else if (!inputDispatcher.matches(owner, capture)) {
+            try {
+                PinnedClient control = new PinnedClient(routeEndpoint, pairing.token, pairing.pin);
+                control.setTimeouts(1000, 1000);
+                inputDispatcher.activate(owner, capture, new InputDispatcher.Sender() {
+                    @Override public void send(InputDispatcher.Event event, String authority) throws Exception {
+                        JSONObject payload = new JSONObject().put("capture_session", authority);
+                        if (event.scroll) payload.put("type", "scroll").put("deltaY", event.first);
+                        else payload.put("type", "tap").put("x", event.first).put("y", event.second);
+                        control.json("/api/input", payload);
+                    }
+                    @Override public void cancel() { control.cancel(); }
+                });
+            } catch (Exception exception) {
+                remoteInputRequested = false;
+                inputMessage = "Remote input unavailable. Reconnect to the Mac and enable Remote input to resume.";
+                enabled = false;
+                status.setText(inputMessage);
+                controls.setVisibility(View.VISIBLE);
+            }
+        }
+        if (inputControl != null && inputControl.isChecked() != remoteInputRequested) inputControl.setChecked(remoteInputRequested);
+        frameView.setInput(enabled, new FrameView.InputListener() {
+            @Override public void tap(String authority, double x, double y) { inputDispatcher.tap(owner, authority, x, y); }
+            @Override public void scroll(String authority, double delta) { inputDispatcher.scroll(owner, authority, delta); }
+        });
+    }
+
+    private void pauseRemoteInput(long epoch, String reason) {
+        remoteInputRequested = false;
+        inputMessage = reason + " Remote input paused; enable Remote input to resume.";
+        ui.post(() -> {
+            if (!inputDispatcher.isCurrent(epoch)) return;
+            updateFrameInput();
+            status.setText(inputMessage);
+            controls.setVisibility(View.VISIBLE);
         });
     }
 
@@ -526,8 +569,8 @@ public final class MainActivity extends Activity {
         ui.post(() -> {
             synchronized (MainActivity.this) {
                 if (!isCurrent(session) || client != owner) return;
-                status.setText(message);
-                if (show) controls.setVisibility(View.VISIBLE);
+                status.setText(inputMessage.isEmpty() ? message : message + "\n" + inputMessage);
+                if (show || !inputMessage.isEmpty()) controls.setVisibility(View.VISIBLE);
             }
         });
     }
@@ -554,16 +597,6 @@ public final class MainActivity extends Activity {
                 updatingControls = false;
             }
         });
-    }
-
-    private void queueInput(String authority, String type, double first, double second) {
-        if (!sessions.captureReady() || !resumed || !sessions.acceptsCapture(authority)) return;
-        try {
-            JSONObject event = new JSONObject().put("type", type).put("capture_session", authority);
-            if ("tap".equals(type)) event.put("x", first).put("y", second);
-            else event.put("deltaY", first);
-            pendingInput.set(event);
-        } catch (Exception ignored) { }
     }
 
     private void requestRefresh() {
@@ -710,6 +743,7 @@ public final class MainActivity extends Activity {
         stopSession();
         releaseWakeLocks();
         worker.shutdownNow();
+        inputWorker.shutdownNow();
         router.close();
         discovery.stop();
         frameView.clearFrame();

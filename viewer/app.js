@@ -21,14 +21,16 @@
   var active = false, generation = 0, session = null, token = '', status = null;
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
   var initialized = false, knownDisplays = [], cancelDecode = null;
+  var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '';
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
   function updateControls() {
-    var allowed = active && initialized && !pendingSettings && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0;
+    var allowed = active && initialized && !pendingSettings && frameID >= 0 && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0;
     $('control').disabled = !allowed;
     if (!allowed) $('control').checked = false;
     var control = allowed && $('control').checked;
+    if (!control && (inputDraining || inputQueue.length || inputRequest)) clearInput();
     $('scrollUp').disabled = !control;
     $('scrollDown').disabled = !control;
     $('viewport').classList.toggle('controlling', !!control);
@@ -39,6 +41,7 @@
     $('frameInfo').textContent = (status && frameID >= 0 ? status.width + ' × ' + status.height + ' · ' : '') + (control ? 'Control enabled' : 'Viewing only');
   }
   function clearFrame() {
+    clearInput();
     frameRevision += 1; frameID = -1;
     if (cancelDecode) { var cancel = cancelDecode; cancelDecode = null; cancel(); }
     frame.hidden = true; frame.removeAttribute('src'); $('placeholder').hidden = false;
@@ -64,7 +67,7 @@
     updateDisplay();
     $('connection').textContent = next.capturing && next.permission ? 'Connected · live' : 'Connected · waiting';
     $('guidance').textContent = statusMessage(next);
-    notice(statusMessage(next));
+    notice(inputMessage || statusMessage(next), !!inputMessage);
     updateControls();
   }
   function updateDisplay() {
@@ -72,7 +75,7 @@
     $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (status && status.displayID != null ? 'Display ' + status.displayID + ' · selected on Mac' : 'Waiting for Mac');
   }
   function stop(clearToken) {
-    active = false; generation += 1;
+    active = false; generation += 1; inputMessage = '';
     if (session) session.abort();
     clearTimeout(timer); timer = null; status = null; frameID = -1; pendingSettings = false; initialized = false;
     clearFrame();
@@ -83,13 +86,15 @@
     if (clearToken) { token = ''; $('token').value = ''; try { sessionStorage.removeItem('booxToken'); } catch (_) {} }
     updateControls();
   }
-  async function request(path, options, run) {
+  async function request(path, options, run, inputSignal) {
     var controller = new AbortController();
     var parent = session.signal;
     var abort = function () { controller.abort(); };
     parent.addEventListener('abort', abort);
+    if (inputSignal) inputSignal.addEventListener('abort', abort);
     if (parent.aborted) controller.abort();
-    var timeout = setTimeout(abort, 8000);
+    if (inputSignal && inputSignal.aborted) controller.abort();
+    var timeout = setTimeout(abort, inputSignal ? 2000 : 8000);
     try {
       var response = await fetch(path, Object.assign({}, options, {
         cache: 'no-store', credentials: 'omit', signal: controller.signal,
@@ -104,7 +109,7 @@
       // Consume the body under the same timeout and cancellation signal.
       if (path.indexOf('/api/frame') === 0) return response.status === 204 ? null : { blob: await response.blob(), id: Number(response.headers.get('X-Frame-ID')), captureSession: response.headers.get('X-Capture-Session') };
       return await response.json();
-    } finally { clearTimeout(timeout); parent.removeEventListener('abort', abort); }
+    } finally { clearTimeout(timeout); parent.removeEventListener('abort', abort); if (inputSignal) inputSignal.removeEventListener('abort', abort); }
   }
   function handleError(error, run) {
     if (run !== generation || !active) return;
@@ -224,19 +229,58 @@
     } catch (error) { handleError(error, run); }
     finally { if (run === generation) { pendingSettings = false; updateControls(); } }
   }
-  async function input(payload) {
+  function clearInput() {
+    inputEpoch += 1; inputQueue = []; inputDraining = false;
+    if (inputRequest) inputRequest.abort();
+    inputRequest = null;
+  }
+  function pauseInput(reason) {
+    clearInput(); $('control').checked = false;
+    inputMessage = reason + ' Remote input paused; enable Tap to control to resume.';
+    updateControls(); notice(inputMessage, true);
+  }
+  function inputTime() { return root.performance ? root.performance.now() : Date.now(); }
+  function input(payload) {
     if (!active || !status || !status.inputEnabled || !$('control').checked || $('control').disabled) return;
-    var run = generation;
     payload = Object.assign({}, payload, { capture_session: status.capture_session });
-    try { await request('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run); }
-    catch (error) { if (run !== generation) return; $('control').checked = false; updateControls(); if (error.status === 401) handleError(error, run); else notice('Mac control is unavailable: ' + error.message + '. Enable input and Accessibility permission on the Mac.', true); }
+    var now = inputTime(), tail = inputQueue[inputQueue.length - 1];
+    if (inputQueue.length && now - inputQueue[0].createdAt >= 2000) { pauseInput('Input waited too long.'); return; }
+    if (payload.type === 'scroll' && tail && tail.payload.type === 'scroll' && Math.sign(tail.payload.deltaY) === Math.sign(payload.deltaY)) {
+      tail.payload.deltaY += payload.deltaY;
+    } else {
+      if (inputQueue.length >= 64) { pauseInput('Too much input is waiting.'); return; }
+      inputQueue.push({ payload: payload, createdAt: now });
+    }
+    if (!inputDraining) { inputDraining = true; drainInput(generation, inputEpoch); }
+  }
+  async function drainInput(run, epoch) {
+    while (run === generation && epoch === inputEpoch && inputQueue.length) {
+      var next = inputQueue.shift(), payload = next.payload;
+      if (inputTime() - next.createdAt >= 2000) { pauseInput('Input waited too long.'); return; }
+      if (payload.type === 'scroll' && Math.abs(payload.deltaY) > 1000) {
+        var delta = Math.sign(payload.deltaY) * 1000;
+        inputQueue.unshift({ payload: Object.assign({}, payload, { deltaY: payload.deltaY - delta }), createdAt: next.createdAt });
+        payload = Object.assign({}, payload, { deltaY: delta });
+      }
+      inputRequest = new AbortController();
+      try { await request('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run, inputRequest.signal); }
+      catch (error) {
+        if (run !== generation || epoch !== inputEpoch) return;
+        pauseInput('Input delivery could not be confirmed.');
+        if (error.status === 401) handleError(error, run);
+        return;
+      }
+      if (run !== generation || epoch !== inputEpoch) return;
+      inputRequest = null;
+    }
+    if (epoch === inputEpoch) inputDraining = false;
   }
   $('pairForm').addEventListener('submit', connect);
   $('disconnect').addEventListener('click', function () { stop(true); panel('pairPanel', 'pairButton', true); notice('Disconnected. Paste a session token to reconnect.'); });
   $('pairButton').addEventListener('click', function () { panel('pairPanel', 'pairButton', $('pairPanel').hidden); });
   $('settingsButton').addEventListener('click', function () { panel('settingsPanel', 'settingsButton', $('settingsPanel').hidden); });
   ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).addEventListener('change', settings); });
-  $('control').addEventListener('change', updateControls);
+  $('control').addEventListener('change', function () { if ($('control').checked) { inputMessage = ''; if (status) notice(statusMessage(status)); } updateControls(); });
   $('scrollUp').addEventListener('click', function () { input({ type: 'scroll', deltaY: 300 }); });
   $('scrollDown').addEventListener('click', function () { input({ type: 'scroll', deltaY: -300 }); });
   $('viewport').addEventListener('click', function (event) { if (event.target !== frame) return; var point = normalizedPoint(frame.getBoundingClientRect(), event.clientX, event.clientY); if (point) input({ type: 'tap', x: point.x, y: point.y }); });

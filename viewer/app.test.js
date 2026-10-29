@@ -63,7 +63,7 @@ function browserHarness(intercept) {
   vm.runInNewContext(fs.readFileSync(require.resolve('./app.js'), 'utf8'), context);
   element('token').value = 'abc'; element('fps').value = '60'; element('maxWidth').value = '1240'; element('grayscale').checked = false;
   const flush = () => new Promise(resolve => setImmediate(resolve));
-  return { element, images, timers, calls, revoked, storage, flush, async tick(elapsed = 2500) { now += elapsed; const entry = [...timers.entries()].find(([, value]) => value.ms < 8000); assert.ok(entry, 'a poll is scheduled'); timers.delete(entry[0]); entry[1].callback(); await flush(); }, async connect() { await element('pairForm').events.submit({ preventDefault() {} }); await flush(); } };
+  return { element, images, timers, calls, revoked, storage, flush, advance(ms) { now += ms; }, async tick(elapsed = 2500) { now += elapsed; const entry = [...timers.entries()].find(([, value]) => value.ms < 8000); assert.ok(entry, 'a poll is scheduled'); timers.delete(entry[0]); entry[1].callback(); await flush(); }, async connect() { await element('pairForm').events.submit({ preventDefault() {} }); await flush(); } };
 }
 
 test('only one frame is requested while decoding, and disconnect invalidates pending decode', async () => {
@@ -362,4 +362,82 @@ test('permission loss clears frames and prevents input even if capture still rep
   assert.equal(h.element('frame').hidden, true);
   assert.equal(h.element('control').disabled, true);
   assert.ok(h.revoked.includes('blob:1'));
+});
+
+test('input stays ordered and responsive while frame decoding is stalled', async () => {
+  let finishInput;
+  const h = browserHarness(path => {
+    if (path === '/api/input' && !finishInput) return new Promise(resolve => { finishInput = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  await h.tick(10);
+  assert.equal(h.images.length, 2);
+  const tap = x => h.element('viewport').events.click({ target: h.element('frame'), clientX: x, clientY: 100 });
+  tap(200); tap(300); tap(400);
+  await h.flush();
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+  finishInput({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.x), [0.125, 0.25, 0.375]);
+  assert.equal(typeof h.images[1].onload, 'function');
+});
+
+test('scroll accumulation preserves distance, direction changes, and tap barriers', async () => {
+  let finishInput;
+  const h = browserHarness(path => {
+    if (path === '/api/input' && !finishInput) return new Promise(resolve => { finishInput = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  h.element('scrollUp').events.click();
+  for (let i = 0; i < 5; i++) h.element('scrollUp').events.click();
+  h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100 });
+  h.element('scrollDown').events.click(); h.element('scrollUp').events.click();
+  finishInput({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.type === 'tap' ? 'tap' : event.deltaY), [300, 1000, 500, 'tap', -300, 300]);
+});
+
+test('control disable aborts pending input and drops queued clicks without replay', async () => {
+  let finishInput;
+  const h = browserHarness(path => {
+    if (path === '/api/input') return new Promise(resolve => { finishInput = resolve; });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  h.element('scrollUp').events.click(); h.element('scrollDown').events.click();
+  const call = h.calls.find(call => call.path === '/api/input');
+  h.element('control').checked = false; h.element('control').events.change();
+  assert.equal(call.options.signal.aborted, true);
+  finishInput({ ok: true, json: async () => ({ ok: true }) }); await h.flush();
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+});
+
+test('input overload and expiry visibly pause control', async () => {
+  for (const overload of [true, false]) {
+    let finishInput;
+    const h = browserHarness(path => {
+      if (path === '/api/input') return new Promise(resolve => { finishInput = resolve; });
+    });
+    await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+    const tap = () => h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100 });
+    tap();
+    if (overload) { for (let i = 0; i < 65; i++) tap(); }
+    else { tap(); h.advance(2000); finishInput({ ok: true, json: async () => ({ ok: true }) }); await h.flush(); }
+    assert.equal(h.element('control').checked, false);
+    assert.match(h.element('notice').textContent, /Remote input paused/);
+    assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+  }
+});
+
+test('uncertain input delivery pauses without retrying the click', async () => {
+  const h = browserHarness(path => { if (path === '/api/input') throw new Error('Lost reply'); });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  h.element('scrollUp').events.click(); h.element('scrollDown').events.click(); await h.flush();
+  assert.equal(h.element('control').checked, false);
+  assert.match(h.element('notice').textContent, /could not be confirmed/);
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
 });
