@@ -20,7 +20,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var active = false, generation = 0, session = null, token = '', status = null;
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
-  var initialized = false, desiredSettings = null, knownDisplays = [], cancelDecode = null;
+  var initialized = false, knownDisplays = [], cancelDecode = null;
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
@@ -35,7 +35,7 @@
     $('reload').disabled = !active;
     $('disconnect').disabled = !active;
     $('connect').disabled = active;
-    ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).disabled = pendingSettings || (active && !initialized); });
+    ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).disabled = !active || !initialized || pendingSettings; });
     $('frameInfo').textContent = (status && frameID >= 0 ? status.width + ' × ' + status.height + ' · ' : '') + (control ? 'Control enabled' : 'Viewing only');
   }
   function clearFrame() {
@@ -61,12 +61,15 @@
       }
       select.value = width;
     }
-    var source = knownDisplays.find(function (display) { return display.id === next.displayID; });
-    $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (next.displayID != null ? 'Display ' + next.displayID + ' · selected on Mac' : 'Waiting for Mac');
+    updateDisplay();
     $('connection').textContent = next.capturing && next.permission ? 'Connected · live' : 'Connected · waiting';
     $('guidance').textContent = statusMessage(next);
     notice(statusMessage(next));
     updateControls();
+  }
+  function updateDisplay() {
+    var source = status && knownDisplays.find(function (display) { return display.id === status.displayID; });
+    $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (status && status.displayID != null ? 'Display ' + status.displayID + ' · selected on Mac' : 'Waiting for Mac');
   }
   function stop(clearToken) {
     active = false; generation += 1;
@@ -148,11 +151,8 @@
     validateProtocol(next);
     var displays = await request('/api/displays', {}, run);
     if (run !== generation) return;
-    var configured = await request('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(desiredSettings) }, run);
-    if (run !== generation) return;
-    validateProtocol(configured);
     knownDisplays = displays.displays;
-    initialized = true; failures = 0; lastStatusAt = Date.now(); applyStatus(configured);
+    initialized = true; failures = 0; lastStatusAt = Date.now(); applyStatus(next);
     panel('pairPanel', 'pairButton', false);
   }
   async function poll(run) {
@@ -166,7 +166,13 @@
         var next = await request('/api/status', {}, run);
         if (run !== generation) return;
         validateProtocol(next);
-        if (statusRevision === frameRevision && !pendingSettings) { failures = 0; lastStatusAt = Date.now(); applyStatus(next); }
+        if (statusRevision === frameRevision && !pendingSettings) {
+          failures = 0; lastStatusAt = Date.now(); applyStatus(next);
+          var displayRevision = frameRevision;
+          var displays = await request('/api/displays', {}, run);
+          if (run !== generation) return;
+          if (displayRevision === frameRevision && !pendingSettings) { knownDisplays = displays.displays; updateDisplay(); }
+        }
       }
       if (status.capturing && status.permission && !pendingSettings) {
         var revision = frameRevision, captureSession = status.capture_session;
@@ -195,13 +201,11 @@
   async function connect(event) {
     event.preventDefault();
     var supplied = $('token').value.trim();
-    var desired = { fps: Number($('fps').value), grayscale: $('grayscale').checked, maxWidth: Number($('maxWidth').value) };
     if (!supplied) return;
     stop(false); token = supplied; active = true; session = new AbortController(); failures = 0; lastStatusAt = 0;
     var run = generation;
     try { sessionStorage.setItem('booxToken', token); } catch (_) {}
     $('connection').textContent = 'Connecting…'; notice('Connecting to the Mac host…'); updateControls();
-    desiredSettings = desired;
     poll(run);
   }
 
@@ -241,6 +245,7 @@
   $('fullscreen').addEventListener('click', async function () { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else notice('Fullscreen is not supported by this browser.'); } catch (_) { notice('The browser could not enter fullscreen.'); } });
   document.addEventListener('fullscreenchange', function () { $('fullscreen').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'; });
   root.addEventListener('pagehide', function () { stop(false); });
+  updateControls();
   var hashToken = tokenFromHash(root.location.hash);
   try { $('token').value = hashToken || sessionStorage.getItem('booxToken') || ''; } catch (_) { $('token').value = hashToken; }
   if (hashToken) { try { history.replaceState(null, '', root.location.pathname + root.location.search); } catch (_) {} }

@@ -156,13 +156,26 @@ test('a status response begun before settings cannot revert settings or dimensio
 });
 
 
-test('connection requests full color at 60 FPS by default', async () => {
-  const h = browserHarness();
+test('connection adopts Sharp text host settings without posting browser defaults', async () => {
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status') Object.assign(status, { fps: 8, maxWidth: 2480, grayscale: true, jpegQuality: 0.88 });
+  });
+  assert.equal(h.element('fps').disabled, true);
   await h.connect();
-  const settings = h.calls.find(call => call.path === '/api/settings');
-  assert.deepEqual(JSON.parse(settings.options.body), { fps: 60, maxWidth: 1240, grayscale: false });
-  assert.equal(h.element('fps').value, '60');
-  assert.equal(h.element('grayscale').checked, false);
+  assert.equal(h.calls.filter(call => call.path === '/api/settings').length, 0);
+  assert.equal(h.element('fps').value, '8');
+  assert.equal(h.element('maxWidth').value, '2480');
+  assert.equal(h.element('grayscale').checked, true);
+  assert.equal(h.element('fps').disabled, false);
+  await h.element('fps').events.change({ target: { id: 'fps', value: '15' } });
+  const settings = h.calls.filter(call => call.path === '/api/settings');
+  assert.equal(settings.length, 1);
+  assert.deepEqual(JSON.parse(settings[0].options.body), { fps: 15 });
+  h.element('disconnect').events.click();
+  assert.equal(h.element('fps').disabled, true);
+  h.element('token').value = 'abc';
+  await h.connect();
+  assert.equal(h.calls.filter(call => call.path === '/api/settings').length, 1, 'reconnect must not post settings');
 });
 
 
@@ -185,13 +198,47 @@ test('local source changes update the read-only display label', async () => {
   let changed = false;
   const h = browserHarness((path, options, status) => {
     if (path === '/api/status' && changed) status.displayID = 2;
+    if (path === '/api/displays' && changed) return { ok: true, status: 200, json: async () => ({ displays: [{ id: 2, name: 'New display', width: 2480, height: 1860 }] }) };
   });
   await h.connect(); h.images[0].onload(); await h.flush();
   changed = true;
   await h.tick();
-  assert.equal(h.element('display').textContent, 'Display 2 · selected on Mac');
+  assert.equal(h.element('display').textContent, 'New display · 2480 × 1860');
   h.element('disconnect').events.click();
   assert.equal(h.element('display').textContent, 'Waiting for Mac');
+});
+
+test('late display metadata cannot restore a disconnected display label', async () => {
+  let deferDisplays = false, resolveDisplays;
+  const h = browserHarness(path => {
+    if (path === '/api/displays' && deferDisplays) return new Promise(resolve => {
+      resolveDisplays = () => resolve({ ok: true, status: 200, json: async () => ({ displays: [{ id: 1, name: 'Late display', width: 1, height: 1 }] }) });
+    });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  deferDisplays = true;
+  await h.tick();
+  h.element('disconnect').events.click();
+  resolveDisplays(); await h.flush();
+  assert.equal(h.element('display').textContent, 'Waiting for Mac');
+  assert.equal(h.element('frame').hidden, true);
+});
+
+test('capture stop clears content before a delayed display refresh completes', async () => {
+  let stopped = false, resolveDisplays;
+  const h = browserHarness((path, options, status) => {
+    if (path === '/api/status' && stopped) { status.capturing = false; status.capture_session = ''; }
+    if (path === '/api/displays' && stopped) return new Promise(resolve => {
+      resolveDisplays = () => resolve({ ok: true, status: 200, json: async () => ({ displays: [] }) });
+    });
+  });
+  await h.connect(); h.images[0].onload(); await h.flush();
+  stopped = true;
+  await h.tick();
+  assert.equal(h.element('frame').hidden, true);
+  assert.equal(h.element('control').disabled, true);
+  resolveDisplays(); await h.flush();
+  assert.equal(h.element('display').textContent, 'Display 1 · selected on Mac');
 });
 
 test('a capture session change clears the displayed frame and requires fresh input opt-in', async () => {
