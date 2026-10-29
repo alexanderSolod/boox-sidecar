@@ -51,9 +51,60 @@ public final class NativeClientTest {
         routePolicyChecks(validPin);
         captureSessionChecks();
         verifierReuseChecks(matched, valid);
+        pairingStoreChecks(validPin);
         matched.cancel();
         expectFailure(() -> matched.frame(0));
-        System.out.println(checks + " native endpoint/token/certificate/route/keepalive checks passed.");
+        System.out.println(checks + " native endpoint/token/certificate/route/keepalive/pairing checks passed.");
+    }
+    static void pairingStoreChecks(String pin) throws Exception {
+        String usb = "https://127.0.0.1:8787", wifi = "https://192.168.1.2:8788", host = "f".repeat(64);
+        Preferences preferences = new Preferences();
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, wifi, TOKEN, pin, host, "auto"), true);
+        preferences.edit().putString("connectionMode", "wifi").commit();
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, "", TOKEN, pin, host, null), true);
+        check(wifi.equals(preferences.getString("wifiHost", "")));
+        check("wifi".equals(preferences.getString("connectionMode", "")));
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, "", TOKEN, pin, host, "usb"), true);
+        check("usb".equals(preferences.getString("connectionMode", "")));
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, "", TOKEN, pin, host, "usb"), false);
+        check("".equals(preferences.getString("wifiHost", "x")));
+        check("usb".equals(preferences.getString("connectionMode", "")));
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, wifi, TOKEN, pin, host, "wifi"), false);
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, "", TOKEN, pin, host, "wifi"), false);
+        check("auto".equals(preferences.getString("connectionMode", "")));
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, wifi, TOKEN, pin, host, "wifi"), false);
+        PairingStore.save(preferences, PairingStore.validate(usb, usb, "", TOKEN, pin, "e".repeat(64), null), true);
+        check("".equals(preferences.getString("wifiHost", "x")));
+        check("auto".equals(preferences.getString("connectionMode", "")));
+        expectFailure(() -> PairingStore.validate(usb, usb, "", TOKEN, pin, host, "lan"));
+    }
+    static final class Preferences implements android.content.SharedPreferences {
+        final java.util.Map<String, Object> values = new java.util.HashMap<>();
+        @Override public java.util.Map<String, ?> getAll() { return new java.util.HashMap<>(values); }
+        @Override public String getString(String key, String fallback) { return values.containsKey(key) ? (String) values.get(key) : fallback; }
+        @Override public java.util.Set<String> getStringSet(String key, java.util.Set<String> fallback) { return fallback; }
+        @Override public int getInt(String key, int fallback) { return values.containsKey(key) ? (Integer) values.get(key) : fallback; }
+        @Override public long getLong(String key, long fallback) { return fallback; }
+        @Override public float getFloat(String key, float fallback) { return fallback; }
+        @Override public boolean getBoolean(String key, boolean fallback) { return fallback; }
+        @Override public boolean contains(String key) { return values.containsKey(key); }
+        @Override public void registerOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener listener) { }
+        @Override public void unregisterOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener listener) { }
+        @Override public Editor edit() {
+            java.util.Map<String, Object> pending = new java.util.HashMap<>(values);
+            return new Editor() {
+                @Override public Editor putString(String key, String value) { pending.put(key, value); return this; }
+                @Override public Editor putStringSet(String key, java.util.Set<String> value) { return this; }
+                @Override public Editor putInt(String key, int value) { pending.put(key, value); return this; }
+                @Override public Editor putLong(String key, long value) { return this; }
+                @Override public Editor putFloat(String key, float value) { return this; }
+                @Override public Editor putBoolean(String key, boolean value) { return this; }
+                @Override public Editor remove(String key) { pending.remove(key); return this; }
+                @Override public Editor clear() { pending.clear(); return this; }
+                @Override public boolean commit() { values.clear(); values.putAll(pending); return true; }
+                @Override public void apply() { commit(); }
+            };
+        }
     }
     static void routePolicyChecks(String identity) {
         String usb = AutoRoutePolicy.USB;

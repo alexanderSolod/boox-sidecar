@@ -63,7 +63,7 @@ enum DevicePairing {
         }
     }
 
-    static func provision(device: BOOXUSBDevice, port: UInt16, host: String, token: String, fingerprint: String?, hostID: String?, preferUSB: Bool = false, wifiHost: String? = nil) throws {
+    static func provision(device: BOOXUSBDevice, port: UInt16, host: String, token: String, fingerprint: String?, hostID: String?, preferUSB: Bool? = nil, wifiHost: String? = nil) throws {
         guard [device.serial, host, token, fingerprint ?? "", hostID ?? "", wifiHost ?? ""].allSatisfy(safe), PairingCredentialStore.valid(token),
               PairingCredentialStore.valid(fingerprint ?? ""), PairingCredentialStore.valid(hostID ?? "") else { throw failure("Invalid pairing parameters.") }
         try Task.checkCancellation()
@@ -77,7 +77,7 @@ enum DevicePairing {
         if let fingerprint, !fingerprint.isEmpty { args += ["--es", "spki_sha256", fingerprint] }
         if let hostID, !hostID.isEmpty { args += ["--es", "host_id", hostID] }
         if let wifiHost, !wifiHost.isEmpty { args += ["--es", "wifi_host", wifiHost] }
-        args += ["--es", "preferred_transport", preferUSB ? "usb" : "auto"]
+        if let preferUSB { args += ["--es", "preferred_transport", preferUSB ? "usb" : "auto"] }
         try Task.checkCancellation()
         _ = try run(adb, args)
     }

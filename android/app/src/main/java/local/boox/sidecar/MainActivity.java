@@ -244,13 +244,14 @@ public final class MainActivity extends Activity {
                 String usbEndpoint = usb.getText().toString().trim();
                 String wifiEndpoint = wifi.isChecked() ? host.getText().toString().trim() : "";
                 PairingStore.Record record = PairingStore.validate(usbEndpoint, usbEndpoint, wifiEndpoint,
-                        token.getText().toString().trim(), pin.getText().toString(), identity.getText().toString(), "auto");
+                        token.getText().toString().trim(), pin.getText().toString(), identity.getText().toString(),
+                        preferences.getString("connectionMode", "auto"));
                 new AlertDialog.Builder(this).setTitle("Replace saved pairing?")
                         .setMessage("Trust these Mac pairing details and replace the saved connection?")
                         .setNegativeButton("Cancel", null)
                         .setPositiveButton("Replace", (confirmation, which) -> {
                             try {
-                                PairingStore.save(preferences, record);
+                                PairingStore.save(preferences, record, false);
                                 stopSession();
                                 discoveredEndpoint = "";
                                 dialog.dismiss();

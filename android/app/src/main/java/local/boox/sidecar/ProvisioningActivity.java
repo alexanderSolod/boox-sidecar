@@ -10,7 +10,7 @@ public final class ProvisioningActivity extends Activity {
         super.onCreate(state);
         try {
             PairingStore.Record record = PairingStore.fromIntent(getIntent());
-            PairingStore.save(getSharedPreferences("pairing", MODE_PRIVATE), record);
+            PairingStore.save(getSharedPreferences("pairing", MODE_PRIVATE), record, true);
             Intent launcher = new Intent(this, MainActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             startActivity(launcher);

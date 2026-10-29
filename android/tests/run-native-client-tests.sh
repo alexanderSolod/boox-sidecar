@@ -32,6 +32,7 @@ make_fixture -genkeypair -alias test -keyalg RSA -keysize 2048 -storetype PKCS12
   "$project_root/android/app/src/main/java/local/boox/sidecar/PinnedClient.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/CaptureSessionState.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/AutoRoutePolicy.java" \
+  "$project_root/android/app/src/main/java/local/boox/sidecar/PairingStore.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/SessionCoordinator.java" \
   "$project_root/android/tests/SessionCoordinatorTest.java" \
   "$project_root/android/tests/NativeClientTest.java"

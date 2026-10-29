@@ -30,8 +30,8 @@ final class PairingStore {
         String pin = PinnedClient.normalizePin(fingerprint);
         String hostId = PinnedClient.normalizePin(identity);
         if (!hostId.matches("[0-9a-f]{64}")) throw new IOException("Provision the Mac installation identity.");
-        String mode = preference == null || preference.isEmpty() ? "auto" : preference;
-        if (!"auto".equals(mode) && !"usb".equals(mode) && !"wifi".equals(mode)) throw new IOException("Invalid transport preference.");
+        String mode = preference == null ? "" : preference;
+        if (!mode.isEmpty() && !"auto".equals(mode) && !"usb".equals(mode) && !"wifi".equals(mode)) throw new IOException("Invalid transport preference.");
         new PinnedClient(usb, token, pin);
         if (!wifi.isEmpty()) new PinnedClient(wifi, token, pin);
         return new Record(host, usb, wifi, token, pin, hostId, mode);
@@ -46,17 +46,20 @@ final class PairingStore {
                 preferences.getString("connectionMode", "auto"));
     }
 
-    static void save(SharedPreferences preferences, Record record) throws IOException {
+    static void save(SharedPreferences preferences, Record record, boolean retainOmitted) throws IOException {
         Map<String, ?> before = preferences.getAll();
         String wifi = record.wifi;
-        if (wifi.isEmpty() && record.hostId.equals(preferences.getString("hostId", ""))
+        String mode = record.mode;
+        if (retainOmitted && record.hostId.equals(preferences.getString("hostId", ""))
                 && record.pin.equals(preferences.getString("spkiPin", ""))) {
-            wifi = preferences.getString("wifiHost", "");
+            if (wifi.isEmpty()) wifi = preferences.getString("wifiHost", "");
+            if (mode.isEmpty()) mode = preferences.getString("connectionMode", "auto");
         }
+        if (mode.isEmpty() || ("wifi".equals(mode) && wifi.isEmpty())) mode = "auto";
         SharedPreferences.Editor editor = preferences.edit();
         editor.putInt("pairingVersion", 2).putString("token", record.token).putString("hostId", record.hostId)
                 .putString("usbHost", record.usb).putString("wifiHost", wifi).putString("spkiPin", record.pin)
-                .putString("connectionMode", record.mode).remove("wifiPin");
+                .putString("connectionMode", mode).remove("wifiPin");
         if (!editor.commit()) {
             SharedPreferences.Editor restore = preferences.edit();
             for (String key : KEYS) {

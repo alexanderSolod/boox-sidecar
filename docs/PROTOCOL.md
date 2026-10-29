@@ -18,7 +18,7 @@ A dedicated Android `.ProvisioningActivity` requires `android.permission.DUMP`. 
 - `spki_sha256`: SHA-256 over the leaf certificate's DER SubjectPublicKeyInfo, encoded as lowercase hex.
 - `usb_host`: HTTPS endpoint on 127.0.0.1 with an explicit port.
 - `host`: primary HTTPS endpoint; optional `wifi_host` retains a Wi-Fi route even when USB is preferred.
-- `preferred_transport`: `auto`, `usb`, or `wifi`.
+- `preferred_transport`: optional `auto`, `usb`, or `wifi`. When `preferred_transport` or `wifi_host` is omitted for the same host ID and pin, the saved value is kept.
 
 Both native transports and Auto probes check certificate validity, the pinned public key, and TLS key possession before sending application credentials. Redirects are rejected. The connection-scoped hostname verifier uses the provisioned key as identity and restricts requests to the configured endpoint; no global TLS bypass is installed. Authenticated status must report protocol 2 and the saved installation ID. USB-only provisioning retains trust for subsequent Wi-Fi discovery.
 
