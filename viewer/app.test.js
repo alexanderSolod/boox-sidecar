@@ -534,3 +534,86 @@ test('mouse clicks and double clicks survive frame element replacement', async (
   assert.deepEqual(captures, [1, 1]);
   assert.deepEqual(sent.map(event => event.clickCount), [1, 2]);
 });
+
+test('touch long press sends one right click while held without a left click or context-menu duplicate', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+  pointer(h, 'pointerdown', 200, 100);
+  const [id, timer] = [...h.timers.entries()].find(([, entry]) => entry.ms === 500);
+  h.advance(500); h.timers.delete(id); timer.callback(); await h.flush();
+  let sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent, [{ type: 'rightClick', x: 0.125, y: 1 / 6, capture_session: 'session-1' }]);
+  pointer(h, 'pointerup', 200, 100);
+  h.element('viewport').events.contextmenu({ clientX: 200, clientY: 100, preventDefault() {} });
+  h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100 });
+  await h.flush();
+  sent = h.calls.filter(call => call.path === '/api/input');
+  assert.equal(sent.length, 1);
+});
+
+test('long press release fallback works when its timer is delayed', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+  pointer(h, 'pointerdown', 200, 100);
+  h.advance(600);
+  pointer(h, 'pointerup', 200, 100); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.type), ['rightClick']);
+});
+
+test('movement, geometry changes, and Mac revocation cancel a pending long press', async () => {
+  for (const reason of ['move', 'resize', 'revoked']) {
+    let denied = false;
+    const h = browserHarness((path, options, status) => {
+      if (path === '/api/status' && denied) status.inputEnabled = false;
+    });
+    await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+    pointer(h, 'pointerdown', 200, 100);
+    const [, timer] = [...h.timers.entries()].find(([, entry]) => entry.ms === 500);
+    if (reason === 'move') pointer(h, 'pointermove', 220, 100);
+    if (reason === 'resize') h.window.events.resize();
+    if (reason === 'revoked') { denied = true; await h.tick(); }
+    h.advance(600); timer.callback();
+    pointer(h, 'pointerup', 200, 100); await h.flush();
+    assert.equal(h.calls.filter(call => call.path === '/api/input').length, 0);
+  }
+});
+
+test('mouse context menu sends a right click only inside the shared image', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+  const menu = x => h.element('viewport').events.contextmenu({ pointerType: 'mouse', clientX: x, clientY: 100, preventDefault() {} });
+  menu(50); menu(200); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent, [{ type: 'rightClick', x: 0.125, y: 1 / 6, capture_session: 'session-1' }]);
+});
+
+test('recognized touch and mouse double clicks reuse the first click location', async () => {
+  for (const kind of ['touch', 'mouse']) {
+    const h = browserHarness();
+    await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+    pointer(h, 'pointerdown', 200, 100, { pointerType: kind });
+    pointer(h, 'pointerup', 200, 100, { pointerType: kind }); await h.flush();
+    h.advance(100);
+    const shift = kind === 'touch' ? 20 : 3;
+    pointer(h, 'pointerdown', 200 + shift, 100 + shift, { pointerType: kind });
+    pointer(h, 'pointerup', 200 + shift, 100 + shift, { pointerType: kind }); await h.flush();
+    let sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+    assert.deepEqual(sent.map(event => event.clickCount), [1, 2]);
+    assert.deepEqual(sent.map(event => [event.x, event.y]), [[0.125, 1 / 6], [0.125, 1 / 6]]);
+    h.advance(100);
+    pointer(h, 'pointerdown', 200, 100, { pointerType: kind });
+    pointer(h, 'pointerup', 200, 100, { pointerType: kind }); await h.flush();
+    h.advance(100);
+    pointer(h, 'pointerdown', 250, 150, { pointerType: kind });
+    pointer(h, 'pointerup', 250, 150, { pointerType: kind }); await h.flush();
+    sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+    assert.deepEqual(sent.map(event => event.clickCount), [1, 2, 1, 1]);
+    assert.deepEqual([sent[3].x, sent[3].y], [0.1875, 0.25]);
+  }
+});

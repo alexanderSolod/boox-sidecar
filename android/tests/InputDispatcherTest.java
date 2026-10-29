@@ -35,6 +35,16 @@ public final class InputDispatcherTest {
         check(f.sender.events.get(4).first == -50);
         check(f.sender.events.get(5).first == 30);
         check(f.pauses.isEmpty());
+
+        f.dispatcher.scroll(f.owner, "capture", 10);
+        f.dispatcher.rightClick(f.owner, "capture", 0.6, 0.7);
+        f.dispatcher.scroll(f.owner, "capture", 20);
+        f.executor.run();
+        check(f.sender.events.size() == 9);
+        check(f.sender.events.get(6).first == 10);
+        InputDispatcher.Event right = f.sender.events.get(7);
+        check(right.rightClick && !right.scroll && right.first == 0.6 && right.second == 0.7);
+        check(f.sender.events.get(8).first == 20);
     }
 
     private static void boundsAndFailure() {

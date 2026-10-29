@@ -17,6 +17,7 @@ final class InputDispatcher {
 
     static final class Event {
         final boolean scroll;
+        final boolean rightClick;
         final double first, second;
         final long createdAt;
         final int clickCount;
@@ -26,7 +27,12 @@ final class InputDispatcher {
         }
 
         Event(boolean scroll, double first, double second, long createdAt, int clickCount) {
-            this.scroll = scroll;
+            this(scroll ? "scroll" : "tap", first, second, createdAt, clickCount);
+        }
+
+        Event(String type, double first, double second, long createdAt, int clickCount) {
+            this.scroll = "scroll".equals(type);
+            this.rightClick = "rightClick".equals(type);
             this.first = first;
             this.second = second;
             this.createdAt = createdAt;
@@ -77,15 +83,20 @@ final class InputDispatcher {
     }
 
     void tap(Object owner, String captureSession, double x, double y, int clickCount) {
-        if (clickCount == 1 || clickCount == 2) enqueue(owner, captureSession, false, x, y, clickCount);
+        if (clickCount == 1 || clickCount == 2) enqueue(owner, captureSession, "tap", x, y, clickCount);
+    }
+
+    void rightClick(Object owner, String captureSession, double x, double y) {
+        enqueue(owner, captureSession, "rightClick", x, y, 1);
     }
 
     void scroll(Object owner, String captureSession, double delta) {
-        if (delta != 0) enqueue(owner, captureSession, true, delta, 0, 1);
+        if (delta != 0) enqueue(owner, captureSession, "scroll", delta, 0, 1);
     }
 
-    private synchronized void enqueue(Object owner, String captureSession, boolean scroll, double first, double second, int clickCount) {
+    private synchronized void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount) {
         if (!matches(owner, captureSession) || !Double.isFinite(first) || !Double.isFinite(second)) return;
+        boolean scroll = "scroll".equals(type);
         long now = clock.getAsLong();
         if (!queue.isEmpty() && now - queue.peekFirst().createdAt >= MAX_AGE_MILLIS) {
             pause("Input waited too long.");
@@ -99,7 +110,7 @@ final class InputDispatcher {
             queue.addLast(new Event(true, accumulated, 0, tail.createdAt));
         } else {
             if (queue.size() >= CAPACITY) { pause("Too much input is waiting."); return; }
-            queue.addLast(new Event(scroll, first, second, now, clickCount));
+            queue.addLast(new Event(type, first, second, now, clickCount));
         }
         if (!draining) {
             draining = true;

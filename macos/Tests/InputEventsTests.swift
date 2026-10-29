@@ -20,6 +20,14 @@ struct InputEventsTests {
             precondition(events[2].getIntegerValueField(.mouseEventClickState) == count)
         }
         precondition(InputEvents.click(at: .zero, count: 3) == nil)
-        print("22 click event checks passed")
+        let right = InputEvents.click(at: CGPoint(x: 40, y: 50), count: 1, button: .right)!
+        precondition(right.map(\.type) == [.mouseMoved, .rightMouseDown, .rightMouseUp])
+        precondition(right[1].getIntegerValueField(.mouseEventButtonNumber) == 1)
+        precondition(right[2].getIntegerValueField(.mouseEventButtonNumber) == 1)
+        precondition(right[1].getIntegerValueField(.mouseEventClickState) == 1)
+        precondition(right[2].getIntegerValueField(.mouseEventClickState) == 1)
+        precondition(InputEvents.click(at: .zero, count: 2, button: .right) == nil)
+        precondition(InputEvents.click(at: .zero, count: 1, button: .center) == nil)
+        print("29 click event checks passed")
     }
 }

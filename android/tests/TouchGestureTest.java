@@ -12,16 +12,18 @@ public final class TouchGestureTest {
         check(f.gesture.down(200, 100, 10));
         check(f.gesture.up(200, 100, 20));
         check(f.counts.equals(List.of(1)) && f.x == 0.125 && f.y == 1.0 / 6);
-        f.gesture.down(201, 101, 100); f.gesture.up(201, 101, 110);
+        f.gesture.down(220, 110, 100); f.gesture.up(220, 110, 110);
         check(f.counts.equals(List.of(1, 2)));
+        check(f.x == 0.125 && f.y == 1.0 / 6);
         f.gesture.down(200, 100, 120); f.gesture.up(200, 100, 130);
         check(f.counts.equals(List.of(1, 2, 1)));
         f.gesture.down(200, 100, 500); f.gesture.up(200, 100, 510);
         check(f.counts.get(3) == 1);
         f.gesture.down(400, 100, 520); f.gesture.up(400, 100, 530);
         check(f.counts.get(4) == 1);
+        check(f.x == 0.375 && f.y == 1.0 / 6);
         f.gesture.down(400, 100, 540); f.gesture.up(400, 100, 1100);
-        check(f.counts.get(5) == 1);
+        check(f.counts.size() == 5 && f.rightClicks == 1);
 
         Fixture scrolling = new Fixture();
         scrolling.gesture.down(200, 100, 0);
@@ -53,6 +55,28 @@ public final class TouchGestureTest {
         check(changed.counts.equals(List.of(1, 1)));
         changed.gesture.clear();
         check(!changed.gesture.down(300, 500, 140));
+
+        Fixture hold = new Fixture();
+        hold.gesture.down(300, 300, 0);
+        check(!hold.gesture.longPress(499));
+        check(hold.gesture.longPress(500));
+        check(hold.rightClicks == 1 && hold.x == 0.25 && hold.y == 0.5);
+        check(!hold.gesture.longPress(1000));
+        check(!hold.gesture.up(300, 300, 1100));
+        check(hold.rightClicks == 1 && hold.counts.isEmpty());
+        hold.gesture.down(300, 300, 1200); hold.gesture.up(300, 300, 1300);
+        check(hold.counts.equals(List.of(1)));
+        hold.gesture.down(300, 300, 1400); hold.gesture.move(320, 300);
+        check(!hold.gesture.longPress(2000));
+        hold.gesture.cancel();
+        hold.gesture.down(300, 300, 2100); hold.gesture.move(300, 320);
+        check(!hold.gesture.longPress(2700));
+        hold.gesture.cancel();
+        hold.gesture.down(300, 300, 2800); hold.gesture.frame("replacement", 100, 0, 800, 600);
+        check(!hold.gesture.longPress(3400));
+        hold.gesture.down(300, 300, 3500); hold.gesture.cancel();
+        check(!hold.gesture.longPress(4100));
+        check(hold.rightClicks == 1);
         System.out.println(checks + " touch gesture checks passed.");
     }
 
@@ -60,12 +84,16 @@ public final class TouchGestureTest {
         final List<Integer> counts = new ArrayList<>();
         final List<Double> deltas = new ArrayList<>();
         double x, y;
+        int rightClicks;
         final TouchGesture gesture = new TouchGesture(8, 30, 300, 500, this);
         Fixture() { gesture.frame("capture", 100, 0, 800, 600); }
         @Override public void tap(String capture, double x, double y, int count) {
             check(!capture.isEmpty()); counts.add(count); this.x = x; this.y = y;
         }
         @Override public void scroll(String capture, double delta) { check(!capture.isEmpty()); deltas.add(delta); }
+        @Override public void rightClick(String capture, double x, double y) {
+            check(!capture.isEmpty()); rightClicks++; this.x = x; this.y = y;
+        }
     }
 
     private static void check(boolean value) { if (!value) throw new AssertionError(); checks++; }

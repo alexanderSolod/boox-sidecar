@@ -22,7 +22,7 @@
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
   var initialized = false, knownDisplays = [], cancelDecode = null;
   var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '';
-  var touchGesture = null, lastTouchTap = null, ignoreClickUntil = 0, suppressTouchClick = false, wheelRemainder = 0;
+  var touchGesture = null, lastTouchTap = null, ignoreClickUntil = 0, suppressTouchClick = false, wheelRemainder = 0, longPressTimer = null, lastPointerKind = 'mouse';
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
@@ -232,6 +232,7 @@
   }
   function clearInput() {
     inputEpoch += 1; inputQueue = []; inputDraining = false;
+    clearTimeout(longPressTimer); longPressTimer = null;
     if (touchGesture) suppressTouchClick = true;
     touchGesture = null; lastTouchTap = null; wheelRemainder = 0;
     if (inputRequest) inputRequest.abort();
@@ -279,18 +280,30 @@
     if (epoch === inputEpoch) inputDraining = false;
   }
   function controlling() { return $('control').checked && !$('control').disabled; }
-  function cancelTouch() { touchGesture = null; lastTouchTap = null; suppressTouchClick = true; ignoreClickUntil = inputTime() + 500; }
+  function cancelTouch() { clearTimeout(longPressTimer); longPressTimer = null; touchGesture = null; lastTouchTap = null; suppressTouchClick = true; ignoreClickUntil = inputTime() + 500; }
+  function longPress(gesture) {
+    longPressTimer = null;
+    if (touchGesture !== gesture || gesture.kind === 'mouse' || gesture.longPressed || gesture.scrolling || gesture.moved || !controlling() || gesture.epoch !== inputEpoch) return;
+    var rect = frame.getBoundingClientRect();
+    if (rect.left !== gesture.rect.left || rect.top !== gesture.rect.top || rect.width !== gesture.rect.width || rect.height !== gesture.rect.height) { cancelTouch(); return; }
+    var point = normalizedPoint(rect, gesture.x, gesture.y);
+    if (!point) return;
+    gesture.longPressed = true; lastTouchTap = null;
+    input({ type: 'rightClick', x: point.x, y: point.y });
+  }
   function moveTouch(event) {
     var gesture = touchGesture;
     if (!gesture || gesture.id !== event.pointerId) return;
     var rect = frame.getBoundingClientRect();
     if (!controlling() || gesture.epoch !== inputEpoch || rect.left !== gesture.rect.left || rect.top !== gesture.rect.top || rect.width !== gesture.rect.width || rect.height !== gesture.rect.height) { cancelTouch(); return; }
+    if (gesture.longPressed) { event.preventDefault(); return; }
     if (Math.abs(event.clientX - gesture.x) > 8) { gesture.moved = true; lastTouchTap = null; }
     if (Math.abs(event.clientY - gesture.y) > 8) {
       if (gesture.kind === 'mouse') gesture.moved = true;
       else gesture.scrolling = true;
       lastTouchTap = null;
     }
+    if (gesture.scrolling || gesture.moved) { clearTimeout(longPressTimer); longPressTimer = null; }
     if (gesture.scrolling) {
       gesture.remainder += event.clientY - gesture.lastY;
       gesture.lastY = event.clientY;
@@ -326,13 +339,15 @@
   }, { passive: false });
   $('viewport').addEventListener('pointerdown', function (event) {
     var kind = event.pointerType || 'mouse';
+    lastPointerKind = kind;
     if (kind === 'mouse' && event.button != null && event.button !== 0) return;
     if (event.isPrimary === false || touchGesture) { cancelTouch(); return; }
     if (!controlling() || event.target !== frame) return;
     var rect = frame.getBoundingClientRect();
     if (!normalizedPoint(rect, event.clientX, event.clientY)) return;
     suppressTouchClick = true;
-    touchGesture = { id: event.pointerId, kind: kind, epoch: inputEpoch, rect: rect, x: event.clientX, y: event.clientY, lastY: event.clientY, downAt: inputTime(), remainder: 0, scrolling: false, moved: false };
+    touchGesture = { id: event.pointerId, kind: kind, epoch: inputEpoch, rect: rect, x: event.clientX, y: event.clientY, lastY: event.clientY, downAt: inputTime(), remainder: 0, scrolling: false, moved: false, longPressed: false };
+    if (kind !== 'mouse') { var gesture = touchGesture; longPressTimer = setTimeout(function () { longPress(gesture); }, 500); }
     if ($('viewport').setPointerCapture) $('viewport').setPointerCapture(event.pointerId);
     event.preventDefault();
   });
@@ -341,19 +356,31 @@
     moveTouch(event);
     var gesture = touchGesture;
     if (!gesture || gesture.id !== event.pointerId) return;
+    clearTimeout(longPressTimer); longPressTimer = null;
+    if (gesture.kind !== 'mouse' && inputTime() - gesture.downAt >= 500) longPress(gesture);
     touchGesture = null; ignoreClickUntil = inputTime() + 500;
+    if (gesture.longPressed) return;
     var point = normalizedPoint(gesture.rect, event.clientX, event.clientY);
     if (gesture.scrolling && Math.abs(gesture.remainder) >= 0.5) input({ type: 'scroll', deltaY: Math.sign(gesture.remainder) });
     if (!gesture.scrolling && !gesture.moved && point) {
       var quick = inputTime() - gesture.downAt < 500;
       var twice = quick && lastTouchTap && lastTouchTap.kind === gesture.kind && gesture.downAt - lastTouchTap.time <= (gesture.kind === 'mouse' ? 500 : 300)
         && Math.hypot(gesture.x - lastTouchTap.x, gesture.y - lastTouchTap.y) <= (gesture.kind === 'mouse' ? 5 : 30);
-      lastTouchTap = twice || !quick ? null : { kind: gesture.kind, time: inputTime(), x: event.clientX, y: event.clientY };
+      if (twice) point = lastTouchTap.point;
+      lastTouchTap = twice || !quick ? null : { kind: gesture.kind, time: inputTime(), x: event.clientX, y: event.clientY, point: point };
       input({ type: 'tap', x: point.x, y: point.y, clickCount: twice ? 2 : 1 });
     } else lastTouchTap = null;
   });
   $('viewport').addEventListener('pointercancel', cancelTouch);
   $('viewport').addEventListener('lostpointercapture', function () { if (touchGesture) cancelTouch(); });
+  $('viewport').addEventListener('contextmenu', function (event) {
+    if (!controlling()) return;
+    var point = normalizedPoint(frame.getBoundingClientRect(), event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    if ((event.pointerType || lastPointerKind) !== 'mouse') return;
+    cancelTouch(); input({ type: 'rightClick', x: point.x, y: point.y });
+  });
   $('reload').addEventListener('click', function () { clearInput(); frameRevision += 1; frameID = -1; updateControls(); notice('Requesting the latest frame. Use the BOOX system controls for a hardware screen refresh.'); });
   $('fit').addEventListener('click', function () { clearInput(); fit = !fit; $('viewport').classList.toggle('actual', !fit); $('fit').setAttribute('aria-pressed', String(fit)); $('fit').textContent = fit ? 'Fit screen' : 'Actual size'; });
   $('fullscreen').addEventListener('click', async function () { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else notice('Fullscreen is not supported by this browser.'); } catch (_) { notice('The browser could not enter fullscreen.'); } });

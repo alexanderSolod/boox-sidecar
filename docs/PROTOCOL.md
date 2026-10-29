@@ -37,7 +37,7 @@ Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is publi
 | `GET /api/displays` | `{"displays":[{"id":UInt32,"name":String,"width":Int,"height":Int}]}` |
 | `POST /api/settings` | Partial settings object; returns status |
 | `GET /api/frame?after=ID` | Latest JPEG newer than ID, or 204 if none; `after` is an integer >= -1 |
-| `POST /api/input` | Tap or scroll; returns `{"ok":true}` or error |
+| `POST /api/input` | Tap, right-click or scroll; returns `{"ok":true}` or error |
 
 Status fields:
 
@@ -65,10 +65,11 @@ Input payloads:
 
 ```json
 {"type":"tap","x":0.5,"y":0.5,"clickCount":1,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"rightClick","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
 {"type":"scroll","deltaY":300,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
 ```
 
-Tap coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Optional `clickCount` is 1 (default) or 2 and describes one down/up pair; a double-click sends a count-1 tap followed by a count-2 tap. Scroll ranges from -1000 to 1000; positive means up. Clients send input in order independently of frame delivery, accumulate adjacent compatible scrolls, and split accumulated deltas at the per-request limit. Input queues allow 64 pending entries and a two-second maximum age; overload, expiry or uncertain delivery visibly pauses control without replaying requests. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.
+Tap and right-click coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Optional `clickCount` on a tap is 1 (default) or 2 and describes one down/up pair; a double-click sends a count-1 tap followed by a count-2 tap at the same coordinates. Clients anchor the qualifying second tap to the first tap’s location. A stationary long press sends one `rightClick`, without a left click on release. Older hosts reject this distinct input type. Scroll ranges from -1000 to 1000; positive means up. Clients send input in order independently of frame delivery, accumulate adjacent compatible scrolls, and split accumulated deltas at the per-request limit. Input queues allow 64 pending entries and a two-second maximum age; overload, expiry or uncertain delivery visibly pauses control without replaying requests. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.
 
 Errors use `{"error":"human readable message"}`. Unknown paths return 404, wrong methods 405, missing/incorrect tokens 401. Clients handle missing permission/start, 204, reconnect, rotation and stale-session cancellation.
 

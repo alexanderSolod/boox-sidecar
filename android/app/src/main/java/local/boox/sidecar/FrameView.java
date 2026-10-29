@@ -10,10 +10,15 @@ import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.os.SystemClock;
 
 /** One displayed bitmap, aspect-preserving coordinates, no history or animation queue. */
 final class FrameView extends View {
-    interface InputListener { void tap(String captureSession, double x, double y, int clickCount); void scroll(String captureSession, double delta); }
+    interface InputListener {
+        void tap(String captureSession, double x, double y, int clickCount);
+        void rightClick(String captureSession, double x, double y);
+        void scroll(String captureSession, double delta);
+    }
     private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final RectF imageBounds = new RectF();
     private Bitmap bitmap;
@@ -24,6 +29,7 @@ final class FrameView extends View {
     private final TouchGesture gesture;
     private boolean inputEnabled;
     private InputListener listener;
+    private final Runnable longPress = this::checkLongPress;
 
     FrameView(Context context) {
         super(context);
@@ -36,13 +42,16 @@ final class FrameView extends View {
             @Override public void scroll(String capture, double delta) {
                 if (inputEnabled && listener != null) listener.scroll(capture, delta);
             }
+            @Override public void rightClick(String capture, double x, double y) {
+                if (inputEnabled && listener != null) listener.rightClick(capture, x, y);
+            }
         });
         setBackgroundColor(Color.WHITE);
-        setContentDescription("Mac display. Enable remote input in controls to tap or scroll.");
+        setContentDescription("Mac display. Enable remote input in controls to tap, scroll, or hold for right-click.");
     }
 
     void setFrame(Bitmap frame, int session, String captureSession) {
-        if (bitmap != null && (bitmap.getWidth() != frame.getWidth() || bitmap.getHeight() != frame.getHeight())) gesture.clear();
+        if (bitmap != null && (bitmap.getWidth() != frame.getWidth() || bitmap.getHeight() != frame.getHeight())) { removeCallbacks(longPress); gesture.clear(); }
         bitmap = frame;
         currentSession = session;
         frameCaptureSession = captureSession;
@@ -54,18 +63,20 @@ final class FrameView extends View {
         frameCaptureSession = "";
         drawnCaptureSession = "";
         gesture.clear();
+        removeCallbacks(longPress);
         imageBounds.setEmpty();
         invalidate();
     }
     void setInput(boolean enabled, InputListener listener) {
         inputEnabled = enabled;
         this.listener = listener;
-        if (!enabled) gesture.cancel();
+        if (!enabled) { removeCallbacks(longPress); gesture.cancel(); }
     }
 
     @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         gesture.clear();
+        removeCallbacks(longPress);
         drawnCaptureSession = "";
     }
 
@@ -89,16 +100,21 @@ final class FrameView extends View {
 
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!inputEnabled || listener == null || drawnCaptureSession.isEmpty()) return false;
-        if (event.getPointerCount() != 1) { gesture.cancel(); return true; }
+        if (event.getPointerCount() != 1) { removeCallbacks(longPress); gesture.cancel(); return true; }
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
-            return gesture.down(event.getX(), event.getY(), event.getEventTime());
+            removeCallbacks(longPress);
+            boolean accepted = gesture.down(event.getX(), event.getY(), event.getEventTime());
+            if (accepted) postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
+            return accepted;
         }
         if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             gesture.cancel();
+            removeCallbacks(longPress);
             return true;
         }
         if (event.getActionMasked() == MotionEvent.ACTION_MOVE) gesture.move(event.getX(), event.getY());
         if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+            removeCallbacks(longPress);
             if (gesture.up(event.getX(), event.getY(), event.getEventTime())) performClick();
             return true;
         }
@@ -106,4 +122,14 @@ final class FrameView extends View {
     }
 
     @Override public boolean performClick() { super.performClick(); return true; }
+
+    private void checkLongPress() {
+        if (inputEnabled) gesture.longPress(SystemClock.uptimeMillis());
+    }
+
+    @Override protected void onDetachedFromWindow() {
+        removeCallbacks(longPress);
+        gesture.cancel();
+        super.onDetachedFromWindow();
+    }
 }

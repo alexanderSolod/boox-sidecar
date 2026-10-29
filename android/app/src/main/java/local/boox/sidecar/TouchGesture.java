@@ -3,6 +3,7 @@ package local.boox.sidecar;
 final class TouchGesture {
     interface Listener {
         void tap(String captureSession, double x, double y, int clickCount);
+        void rightClick(String captureSession, double x, double y);
         void scroll(String captureSession, double delta);
     }
 
@@ -10,7 +11,8 @@ final class TouchGesture {
     private final long doubleTapTimeout, longPressTimeout;
     private final Listener listener;
     private String capture = "", active = "", lastTapCapture = "";
-    private double left, top, width, height, startX, startY, lastY, remainder, lastTapX, lastTapY;
+    private double left, top, width, height, startX, startY, currentX, currentY, lastY, remainder, lastTapX, lastTapY;
+    private double lastTapNormalizedX, lastTapNormalizedY;
     private long downAt, lastTapAt;
     private boolean scrolling, moved;
 
@@ -47,6 +49,8 @@ final class TouchGesture {
         active = capture;
         startX = x;
         startY = lastY = y;
+        currentX = x;
+        currentY = y;
         downAt = time;
         remainder = 0;
         scrolling = false;
@@ -56,6 +60,8 @@ final class TouchGesture {
 
     void move(double x, double y) {
         if (active.isEmpty()) return;
+        currentX = x;
+        currentY = y;
         if (!scrolling && Math.abs(y - startY) > touchSlop) {
             scrolling = true;
             lastTapCapture = "";
@@ -73,6 +79,7 @@ final class TouchGesture {
     boolean up(double x, double y, long time) {
         if (active.isEmpty()) return false;
         move(x, y);
+        if (longPress(time)) return false;
         String authority = active;
         active = "";
         if (scrolling && Math.abs(remainder) >= 0.5) listener.scroll(authority, Math.copySign(1, remainder));
@@ -84,11 +91,23 @@ final class TouchGesture {
         boolean quick = time >= downAt && time - downAt < longPressTimeout;
         boolean twice = quick && authority.equals(lastTapCapture) && downAt >= lastTapAt && downAt - lastTapAt <= doubleTapTimeout
                 && dx * dx + dy * dy <= doubleTapSlop * doubleTapSlop;
+        double normalizedX = twice ? lastTapNormalizedX : (x - left) / width;
+        double normalizedY = twice ? lastTapNormalizedY : (y - top) / height;
         lastTapCapture = twice || !quick ? "" : authority;
         lastTapAt = time;
         lastTapX = x;
         lastTapY = y;
-        listener.tap(authority, (x - left) / width, (y - top) / height, twice ? 2 : 1);
+        lastTapNormalizedX = normalizedX;
+        lastTapNormalizedY = normalizedY;
+        listener.tap(authority, normalizedX, normalizedY, twice ? 2 : 1);
+        return true;
+    }
+
+    boolean longPress(long time) {
+        if (active.isEmpty() || scrolling || moved || time - downAt < longPressTimeout || !contains(currentX, currentY)) return false;
+        String authority = active;
+        cancel();
+        listener.rightClick(authority, (currentX - left) / width, (currentY - top) / height);
         return true;
     }
 
