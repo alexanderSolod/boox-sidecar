@@ -133,7 +133,14 @@ import CryptoKit
     static func checkAuthority() {
         let authority = SharingAuthority(), token = String(repeating: "a", count: 64)
         expect(SharingAuthority.matchesCredential(header: "Bearer " + token, token: token), "Valid credential rejected")
-        for header in [nil, "bearer " + token, "Bearer " + token + "a", "Bearer b" + token.dropFirst(), "Bearer " + token.dropLast() + "b"] {
+        let invalidHeaders: [String?] = [
+            nil,
+            "bearer " + token,
+            "Bearer " + token + "a",
+            "Bearer b" + String(token.dropFirst()),
+            "Bearer " + String(token.dropLast()) + "b"
+        ]
+        for header in invalidHeaders {
             expect(!SharingAuthority.matchesCredential(header: header, token: token), "Invalid credential accepted")
         }
         expect(!authority.ticket(expiresAt: .distantPast).perform { fatalError("Expired ticket executed") }, "Expired authority accepted")
