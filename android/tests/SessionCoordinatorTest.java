@@ -51,6 +51,7 @@ public final class SessionCoordinatorTest {
         sleepRecovery();
         delayedCompletion(false);
         delayedCompletion(true);
+        inputAuthorization();
         System.out.println("PASS: session startup, route recovery, ownership, capture changes and pause/resume");
     }
 
@@ -81,6 +82,58 @@ public final class SessionCoordinatorTest {
         check(sessions.activate(resumed, usb));
         check(!sessions.updateCapture(session, wifi, false, "", true));
         check(!sessions.hostAsleep());
+    }
+
+    private static void inputAuthorization() {
+        SessionCoordinator<Object> sessions = new SessionCoordinator<>();
+        Object usb = new Object();
+        Object wifi = new Object();
+        int session = sessions.begin();
+        check(sessions.activate(session, usb));
+        check(sessions.updateCapture(session, usb, true, "capture-one", false));
+        check(!sessions.inputAllowed());
+        sessions.updateInputPermission(session, usb, true);
+        check(sessions.inputAllowed());
+        sessions.updateInputPermission(session, usb, false);
+        check(!sessions.inputAllowed());
+        sessions.updateInputPermission(session, wifi, true);
+        check(!sessions.hostInputEnabled());
+        sessions.updateInputPermission(session, usb, true);
+        check(sessions.pauseInput(usb, "capture-one", "Delivery uncertain."));
+        check(!sessions.inputAllowed());
+        sessions.updateInputPermission(session, usb, true);
+        check(!sessions.inputAllowed());
+        check(sessions.activate(session, wifi));
+        check(!sessions.hostInputEnabled());
+        check(sessions.updateCapture(session, wifi, true, "capture-one", false));
+        sessions.updateInputPermission(session, wifi, true);
+        check(!sessions.inputAllowed());
+        check(!sessions.pauseInput(usb, "capture-one", "Obsolete route."));
+        check(!sessions.pauseInput(wifi, "obsolete-capture", "Obsolete capture."));
+        check(sessions.inputPauseReason().equals("Delivery uncertain."));
+        sessions.updateInputPermission(session, wifi, false);
+        check(!sessions.resumeInput());
+        check(!sessions.inputPauseReason().isEmpty());
+        sessions.updateInputPermission(session, wifi, true);
+        check(sessions.updateCapture(session, wifi, false, "", false));
+        check(!sessions.resumeInput());
+        check(sessions.updateCapture(session, wifi, true, "capture-one", false));
+        check(sessions.resumeInput());
+        check(sessions.inputAllowed());
+        check(sessions.pauseInput(wifi, "capture-one", "Queue full."));
+        sessions.stop();
+        int resumed = sessions.begin();
+        check(sessions.activate(resumed, usb));
+        check(sessions.updateCapture(resumed, usb, true, "capture-one", false));
+        sessions.updateInputPermission(session, usb, true);
+        check(!sessions.hostInputEnabled());
+        sessions.updateInputPermission(resumed, usb, true);
+        check(!sessions.inputAllowed());
+        check(sessions.updateCapture(resumed, usb, true, "capture-two", false));
+        check(sessions.inputAllowed());
+        check(sessions.inputPauseReason().isEmpty());
+        check(sessions.failed(resumed, usb));
+        check(!sessions.inputAllowed() && !sessions.hostInputEnabled());
     }
 
     private static void delayedCompletion(boolean pauseAndResume) throws Exception {

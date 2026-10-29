@@ -74,12 +74,12 @@ public final class MainActivity extends Activity {
     private ConnectivityManager.NetworkCallback networkCallback;
     private BroadcastReceiver powerReceiver;
     private CheckBox colorControl;
-    private CheckBox inputControl;
+    private TextView inputStatus;
+    private Button resumeInputButton;
     private boolean updatingControls;
     private volatile PinnedClient client;
     private volatile SessionRouter.Pairing routePairing;
-    private volatile boolean remoteInputRequested;
-    private volatile String inputMessage = "";
+    private volatile ControlOwner controlOwner;
     private boolean fullscreen = true;
     private long lastFrameID = -1;
     private long nextStatusAt;
@@ -170,15 +170,17 @@ public final class MainActivity extends Activity {
             queueSettings();
         });
         second.addView(colorToggle);
-        CheckBox inputToggle = new CheckBox(this);
-        inputControl = inputToggle;
-        inputToggle.setText("Remote input");
-        inputToggle.setOnCheckedChangeListener((button, checked) -> {
-            remoteInputRequested = checked;
-            if (checked) inputMessage = "";
-            updateFrameInput();
+        inputStatus = new TextView(this);
+        inputStatus.setText("Remote input: waiting for Mac");
+        second.addView(inputStatus);
+        resumeInputButton = button("Resume input", () -> {
+            if (sessions.resumeInput()) {
+                updateFrameInput();
+                if (sessions.inputAllowed()) status.setText("Remote input follows the Mac setting.");
+            }
         });
-        second.addView(inputToggle);
+        resumeInputButton.setVisibility(View.GONE);
+        second.addView(resumeInputButton);
         controls.addView(scrolling(second));
         LinearLayout profiles = row();
         profiles.addView(button("Speed", () -> applyProfile(1240, true, 0.60)));
@@ -331,7 +333,7 @@ public final class MainActivity extends Activity {
         measurementStart = SystemClock.elapsedRealtime();
         receivedFrames = 0;
         router.activated(session);
-        inputDispatcher.stop();
+        stopInput();
         PendingFrame discard = pendingFrame.getAndSet(null);
         if (discard != null) discard.bitmap.recycle();
         if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
@@ -370,7 +372,7 @@ public final class MainActivity extends Activity {
         routeEndpoint = "";
         routePairing = null;
         if (previous != null) previous.cancel();
-        inputDispatcher.stop();
+        stopInput();
         pendingSettings.set(null);
         PendingFrame previousFrame = pendingFrame.getAndSet(null);
         if (previousFrame != null) previousFrame.bitmap.recycle();
@@ -407,7 +409,7 @@ public final class MainActivity extends Activity {
                     SessionRouter.validateHost(pairing, result);
                     adoptHostSettings(session, connection, result);
                     setCaptureState(session, connection, result.optBoolean("permission") && result.optBoolean("capturing"),
-                            result.optString("capture_session", ""), result.optBoolean("displayAsleep", false));
+                            result.optString("capture_session", ""), result.optBoolean("displayAsleep", false), result.optBoolean("inputEnabled", false));
                     if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
                     hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
                             : sessions.hostAsleep() ? "Mac display asleep — resumes on wake"
@@ -472,13 +474,13 @@ public final class MainActivity extends Activity {
 
     private synchronized void connectionFailed(int session, PinnedClient connection, Exception exception) {
         if (!isCurrent(session) || !sessions.owns(session, connection)) return;
-        setCaptureState(session, connection, false, "", sessions.hostAsleep());
+        setCaptureState(session, connection, false, "", sessions.hostAsleep(), false);
         sessions.failed(session, connection);
         connection.cancel();
         client = null;
         routeEndpoint = "";
         routePairing = null;
-        inputDispatcher.stop();
+        stopInput();
         ui.post(() -> {
             synchronized (MainActivity.this) {
                 if (!isCurrent(session) || client != null) return;
@@ -499,12 +501,14 @@ public final class MainActivity extends Activity {
         else frameView.setFrame(frame.bitmap, frame.session, frame.captureSession);
     }
 
-    private synchronized void setCaptureState(int session, PinnedClient owner, boolean ready, String reportedSession, boolean asleep) {
+    private synchronized void setCaptureState(int session, PinnedClient owner, boolean ready, String reportedSession, boolean asleep, boolean inputEnabled) {
         if (!isCurrent(session) || !sessions.owns(session, owner)) return;
         boolean changed = sessions.updateCapture(session, owner, ready, reportedSession, asleep);
+        sessions.updateInputPermission(session, owner, inputEnabled);
+        if (!sessions.inputAllowed()) stopInput();
         if (!sessions.captureReady() || changed) {
             lastFrameID = -1;
-            inputDispatcher.stop();
+            stopInput();
             PendingFrame discarded = pendingFrame.getAndSet(null);
             if (discarded != null) discarded.bitmap.recycle();
         }
@@ -520,12 +524,17 @@ public final class MainActivity extends Activity {
         });
     }
 
+    private void stopInput() {
+        controlOwner = null;
+        inputDispatcher.stop();
+    }
+
     private synchronized void updateFrameInput() {
         PinnedClient owner = client;
         String capture = sessions.captureSession();
         SessionRouter.Pairing pairing = routePairing;
-        boolean enabled = resumed && remoteInputRequested && sessions.captureReady() && owner != null && pairing != null;
-        if (!enabled) inputDispatcher.stop();
+        boolean enabled = resumed && sessions.inputAllowed() && owner != null && pairing != null;
+        if (!enabled) stopInput();
         else if (!inputDispatcher.matches(owner, capture)) {
             try {
                 PinnedClient control = new PinnedClient(routeEndpoint, pairing.token, pairing.pin);
@@ -542,15 +551,24 @@ public final class MainActivity extends Activity {
                     }
                     @Override public void cancel() { control.cancel(); }
                 });
+                controlOwner = new ControlOwner(owner, capture);
             } catch (Exception exception) {
-                remoteInputRequested = false;
-                inputMessage = "Remote input unavailable. Reconnect to the Mac and enable Remote input to resume.";
-                enabled = false;
-                status.setText(inputMessage);
+                sessions.pauseInput(owner, capture, "Input connection unavailable.");
+                stopInput();
+                status.setText(inputPauseMessage());
                 controls.setVisibility(View.VISIBLE);
             }
         }
-        if (inputControl != null && inputControl.isChecked() != remoteInputRequested) inputControl.setChecked(remoteInputRequested);
+        enabled = enabled && sessions.inputAllowed();
+        if (!enabled) stopInput();
+        String label = owner == null ? "Remote input: waiting for Mac"
+                : !sessions.hostInputEnabled() ? "Remote input: enable on Mac"
+                : !sessions.captureReady() ? "Remote input: waiting for sharing"
+                : !sessions.inputPauseReason().isEmpty() ? "Remote input: paused"
+                : "Remote input: enabled on Mac";
+        inputStatus.setText(label);
+        resumeInputButton.setVisibility(sessions.inputPauseReason().isEmpty() ? View.GONE : View.VISIBLE);
+        resumeInputButton.setEnabled(resumed && sessions.hostInputEnabled() && sessions.captureReady());
         frameView.setInput(enabled, new FrameView.InputListener() {
             @Override public void tap(String authority, double x, double y, int clickCount) { inputDispatcher.tap(owner, authority, x, y, clickCount); }
             @Override public void rightClick(String authority, double x, double y) { inputDispatcher.rightClick(owner, authority, x, y); }
@@ -559,20 +577,36 @@ public final class MainActivity extends Activity {
     }
 
     private void pauseRemoteInput(long epoch, String reason) {
-        remoteInputRequested = false;
-        inputMessage = reason + " Remote input paused; enable Remote input to resume.";
+        ControlOwner current = controlOwner;
+        if (!inputDispatcher.isCurrent(epoch) || current == null
+                || !sessions.pauseInput(current.owner, current.capture, reason)) return;
         ui.post(() -> {
             if (!inputDispatcher.isCurrent(epoch)) return;
             updateFrameInput();
-            status.setText(inputMessage);
+            status.setText(inputPauseMessage());
             controls.setVisibility(View.VISIBLE);
         });
+    }
+
+    private String inputPauseMessage() {
+        String reason = sessions.inputPauseReason();
+        return reason.isEmpty() ? "" : reason + " Remote input paused; tap Resume input to continue.";
+    }
+
+    private static final class ControlOwner {
+        final PinnedClient owner;
+        final String capture;
+        ControlOwner(PinnedClient owner, String capture) {
+            this.owner = owner;
+            this.capture = capture;
+        }
     }
 
     private void postStatus(int session, PinnedClient owner, String message, boolean show) {
         ui.post(() -> {
             synchronized (MainActivity.this) {
                 if (!isCurrent(session) || client != owner) return;
+                String inputMessage = inputPauseMessage();
                 status.setText(inputMessage.isEmpty() ? message : message + "\n" + inputMessage);
                 if (show || !inputMessage.isEmpty()) controls.setVisibility(View.VISIBLE);
             }

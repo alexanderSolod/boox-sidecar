@@ -47,7 +47,7 @@ final class FrameView extends View {
             }
         });
         setBackgroundColor(Color.WHITE);
-        setContentDescription("Mac display. Enable remote input in controls to tap, scroll, or hold for right-click.");
+        setContentDescription("Mac display. Enable input on the Mac to tap, scroll, or hold for right-click.");
     }
 
     void setFrame(Bitmap frame, int session, String captureSession) {

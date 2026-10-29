@@ -21,17 +21,17 @@
   var active = false, generation = 0, session = null, token = '', status = null;
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
   var initialized = false, knownDisplays = [], cancelDecode = null;
-  var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '';
+  var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '', inputPaused = false, pausedCapture = '';
   var touchGesture = null, lastTouchTap = null, ignoreClickUntil = 0, suppressTouchClick = false, wheelRemainder = 0, longPressTimer = null, lastPointerKind = 'mouse';
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
   function updateControls() {
-    var allowed = active && initialized && !pendingSettings && frameID >= 0 && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0;
-    $('control').disabled = !allowed;
-    if (!allowed) $('control').checked = false;
-    var control = allowed && $('control').checked;
-    if (!control && (inputDraining || inputQueue.length || inputRequest)) clearInput();
+    var allowed = inputReady(), control = allowed && !inputPaused;
+    $('inputStatus').textContent = inputPaused ? 'Remote input paused' : control ? 'Remote input enabled on Mac' : status && !status.inputEnabled ? 'Enable remote input on the Mac' : 'Remote input unavailable';
+    $('resumeInput').hidden = !inputPaused;
+    $('resumeInput').disabled = !allowed;
+    if (!control && (inputDraining || inputQueue.length || inputRequest || touchGesture || lastTouchTap)) clearInput();
     $('scrollUp').disabled = !control;
     $('scrollDown').disabled = !control;
     $('viewport').classList.toggle('controlling', !!control);
@@ -47,10 +47,11 @@
     if (cancelDecode) { var cancel = cancelDecode; cancelDecode = null; cancel(); }
     frame.hidden = true; frame.removeAttribute('src'); $('placeholder').hidden = false;
     if (currentURL) URL.revokeObjectURL(currentURL);
-    currentURL = null; $('control').checked = false;
+    currentURL = null;
   }
   function applyStatus(next) {
     if (!next.capturing || !next.permission || (status && (next.displayID !== status.displayID || next.capture_session !== status.capture_session)) || (Number.isFinite(next.frameID) && next.frameID < frameID)) clearFrame();
+    if (inputPaused && next.capture_session && next.capture_session !== pausedCapture) { inputPaused = false; inputMessage = ''; pausedCapture = ''; }
     status = next;
     var fps = String(next.fps || 60), fpsSelect = $('fps');
     if (!Array.from(fpsSelect.options || fpsSelect.children).some(function (option) { return String(option.value) === fps; })) {
@@ -76,7 +77,7 @@
     $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (status && status.displayID != null ? 'Display ' + status.displayID + ' · selected on Mac' : 'Waiting for Mac');
   }
   function stop(clearToken) {
-    active = false; generation += 1; inputMessage = '';
+    active = false; generation += 1;
     if (session) session.abort();
     clearTimeout(timer); timer = null; status = null; frameID = -1; pendingSettings = false; initialized = false;
     clearFrame();
@@ -239,13 +240,13 @@
     inputRequest = null;
   }
   function pauseInput(reason) {
-    clearInput(); $('control').checked = false;
-    inputMessage = reason + ' Remote input paused; enable Tap to control to resume.';
+    clearInput(); inputPaused = true; pausedCapture = status ? status.capture_session : '';
+    inputMessage = reason + ' Remote input paused; choose Resume input to continue.';
     updateControls(); notice(inputMessage, true);
   }
   function inputTime() { return root.performance ? root.performance.now() : Date.now(); }
   function input(payload) {
-    if (!active || !status || !status.inputEnabled || !$('control').checked || $('control').disabled) return;
+    if (!controlling()) return;
     payload = Object.assign({}, payload, { capture_session: status.capture_session });
     var now = inputTime(), tail = inputQueue[inputQueue.length - 1];
     if (inputQueue.length && now - inputQueue[0].createdAt >= 2000) { pauseInput('Input waited too long.'); return; }
@@ -279,7 +280,8 @@
     }
     if (epoch === inputEpoch) inputDraining = false;
   }
-  function controlling() { return $('control').checked && !$('control').disabled; }
+  function inputReady() { return !!(active && initialized && !pendingSettings && frameID >= 0 && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0); }
+  function controlling() { return inputReady() && !inputPaused; }
   function cancelTouch() { clearTimeout(longPressTimer); longPressTimer = null; touchGesture = null; lastTouchTap = null; suppressTouchClick = true; ignoreClickUntil = inputTime() + 500; }
   function longPress(gesture) {
     longPressTimer = null;
@@ -317,7 +319,11 @@
   $('pairButton').addEventListener('click', function () { panel('pairPanel', 'pairButton', $('pairPanel').hidden); });
   $('settingsButton').addEventListener('click', function () { panel('settingsPanel', 'settingsButton', $('settingsPanel').hidden); });
   ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).addEventListener('change', settings); });
-  $('control').addEventListener('change', function () { if ($('control').checked) { inputMessage = ''; if (status) notice(statusMessage(status)); } updateControls(); });
+  $('resumeInput').addEventListener('click', function () {
+    if (!inputPaused || !inputReady()) return;
+    clearInput(); inputPaused = false; inputMessage = ''; pausedCapture = '';
+    updateControls(); notice(statusMessage(status));
+  });
   $('scrollUp').addEventListener('click', function () { input({ type: 'scroll', deltaY: 300 }); });
   $('scrollDown').addEventListener('click', function () { input({ type: 'scroll', deltaY: -300 }); });
   $('viewport').addEventListener('click', function (event) {

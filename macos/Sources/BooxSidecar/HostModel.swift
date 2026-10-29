@@ -799,6 +799,7 @@ struct DisplayInfo: Identifiable {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             inputEnabled = AXIsProcessTrustedWithOptions(options)
             if !inputEnabled { message = "Allow Accessibility in System Settings, then enable remote input again." }
+            else if message == "Allow Accessibility in System Settings, then enable remote input again." { message = "" }
         } else { inputEnabled = false }
     }
 
