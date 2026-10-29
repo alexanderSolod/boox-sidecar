@@ -10,7 +10,7 @@ For released binaries, see [installation instructions](docs/INSTALL.md).
 2. On first setup, connect the BOOX by USB, enable USB debugging and authorize this Mac.
 3. Install the Android app: `./scripts/install-native.sh`.
 4. Click **Connect** on the Mac. It creates the BOOX desktop, starts capture, enables encrypted Wi-Fi when available unless explicitly disabled, establishes the USB tunnel and provisions the installed native app.
-5. Move windows onto the BOOX desktop using your Mac's display arrangement. Its logical size is 1240 × 930, backed by a 2480 × 1860 HiDPI display. The app remembers its position; if that position is unavailable, it places the BOOX beside the rightmost display.
+5. Move windows onto the BOOX desktop using your Mac's display arrangement. Its logical size is 1240 × 930, backed by a 2480 × 1860 HiDPI display. The app remembers its position. Use **Left/Right** to choose a new side; if needed, placement moves outside the other displays to avoid overlap.
 6. Later, open both apps and click **Connect**. The Android app remembers this Mac. **Auto** prefers USB, falls back to the saved pinned Wi-Fi route, and returns to USB when available. Wi-Fi needs both devices on a reachable network; USB works without Wi-Fi.
 
 Protocol 2 requires updating both apps and pairing again over USB. Pairing survives normal restarts. Both USB and Wi-Fi require TLS and the saved public-key pin; discovery can locate a remembered Mac but cannot pair an unknown Mac.

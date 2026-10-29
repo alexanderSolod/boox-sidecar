@@ -17,6 +17,16 @@ import CoreGraphics
         expect(placement.preferredOrigin(size: size, otherDisplays: [main, right]) == CGPoint(x: 3360, y: -100), "Right monitor must not overlap")
         expect(placement.preferredOrigin(size: size, otherDisplays: [main, left]) == CGPoint(x: 1440, y: 0), "Negative origins must remain valid")
         expect(placement.preferredOrigin(size: size, otherDisplays: [main, above]) == CGPoint(x: 1920, y: -1080), "Staggered top monitor must remain reachable")
+        expect(placement.preferredOrigin(size: size, otherDisplays: [main], mainDisplay: main) == CGPoint(x: 1440, y: 0), "Right selection must adjoin the main display")
+        expect(placement.preferredOrigin(size: size, otherDisplays: [main], mainDisplay: main, onLeft: true) == CGPoint(x: -1240, y: 0), "Left selection must adjoin the main display")
+        expect(placement.preferredOrigin(size: size, otherDisplays: [main, above], mainDisplay: main) == CGPoint(x: 1440, y: 0), "A usable main-display edge must precede the outermost fallback")
+        let occupied = [left, main, right]
+        let leftFallback = placement.preferredOrigin(size: size, otherDisplays: occupied, mainDisplay: main, onLeft: true)
+        let rightFallback = placement.preferredOrigin(size: size, otherDisplays: occupied, mainDisplay: main)
+        expect(leftFallback == CGPoint(x: -3160, y: -100), "Occupied left side must fall back beyond the leftmost monitor")
+        expect(rightFallback == CGPoint(x: 3360, y: -100), "Occupied right side must fall back beyond the rightmost monitor")
+        expect(leftFallback.map { VirtualDisplayPlacement.isUsable(origin: $0, size: size, otherDisplays: occupied) } == true, "Left fallback must remain adjoining and nonoverlapping")
+        expect(rightFallback.map { VirtualDisplayPlacement.isUsable(origin: $0, size: size, otherDisplays: occupied) } == true, "Right fallback must remain adjoining and nonoverlapping")
 
         placement.arranged(at: CGPoint(x: 1440, y: 0))
         placement.observe(origin: CGPoint(x: -1240, y: 0), size: size, otherDisplays: [main])
@@ -25,6 +35,7 @@ import CoreGraphics
         expect(placement.savedOrigin == CGPoint(x: -1240, y: 0), "Removal must retain the chosen origin")
         placement = VirtualDisplayPlacement(data: saved)
         expect(placement.preferredOrigin(size: size, otherDisplays: [main]) == CGPoint(x: -1240, y: 0), "Restart must restore left placement without a display ID")
+        expect(placement.preferredOrigin(size: size, otherDisplays: [main], mainDisplay: main, onLeft: false) == CGPoint(x: -1240, y: 0), "A remembered custom origin must take precedence over the fallback side")
         placement.arranged(at: CGPoint(x: -1240, y: 0))
         placement.observe(origin: CGPoint(x: 0, y: -930), size: size, otherDisplays: [main])
         expect(VirtualDisplayPlacement(data: placement.data).savedOrigin == CGPoint(x: 0, y: -930), "Above placement must survive restart")
@@ -47,6 +58,13 @@ import CoreGraphics
             expect(VirtualDisplayPlacement(data: Data(json.utf8)).savedOrigin == nil, "Malformed preferences must be ignored")
         }
         expect(placement.preferredOrigin(size: size, otherDisplays: []) == nil, "Missing desktop must not invent a placement")
+        let fresh = VirtualDisplayPlacement()
+        for onLeft in [false, true] {
+            expect(fresh.preferredOrigin(size: size, otherDisplays: [], mainDisplay: main, onLeft: onLeft) == nil, "A main-display hint must not invent a missing desktop")
+            expect(fresh.preferredOrigin(size: size, otherDisplays: [main, .zero], mainDisplay: main, onLeft: onLeft) == nil, "Invalid desktop geometry must reject both side placements")
+            expect(fresh.preferredOrigin(size: .zero, otherDisplays: [main], mainDisplay: main, onLeft: onLeft) == nil, "Zero display size must reject both side placements")
+            expect(fresh.preferredOrigin(size: CGSize(width: CGFloat.infinity, height: 930), otherDisplays: [main], mainDisplay: main, onLeft: onLeft) == nil, "Nonfinite display size must reject both side placements")
+        }
         print("PASS: virtual display placement, persistence, topology changes and invalid geometry")
     }
 }

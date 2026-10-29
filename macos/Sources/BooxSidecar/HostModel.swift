@@ -39,6 +39,7 @@ struct DisplayInfo: Identifiable {
     @Published var connectionMessage = "Open the BOOX app, then click Connect. First-time pairing needs USB."
     @Published var wirelessStarting = false
     @Published var displayAsleep = false
+    @Published var displayPosition = "right"
     private struct ResumeTarget {
         let displayID: CGDirectDisplayID
         let extended: Bool
@@ -124,6 +125,7 @@ struct DisplayInfo: Identifiable {
             if let value = prefs.object(forKey: "capture.width") as? Int, (600...2480).contains(value) { maxWidth = value }
             if prefs.object(forKey: "capture.grayscale") != nil { grayscale = prefs.bool(forKey: "capture.grayscale") }
             if let value = prefs.object(forKey: "capture.jpegQuality") as? Double, (0.4...0.95).contains(value) { jpegQuality = value }
+            if let value = prefs.string(forKey: "display.position"), ["left", "right"].contains(value) { displayPosition = value }
         }
         refreshDisplays()
         virtualDisplay.onConfigurationChanged = { [weak self] in
@@ -231,7 +233,7 @@ struct DisplayInfo: Identifiable {
     }
 
     private func saveVirtualDisplayPlacement() {
-        if !browserEnabled, let data = virtualPlacement.data { UserDefaults.standard.set(data, forKey: "virtualDisplay.placement") }
+        if !browserEnabled { UserDefaults.standard.set(virtualPlacement.data, forKey: "virtualDisplay.placement") }
     }
 
     private func releaseVirtualDisplay() {
@@ -286,7 +288,7 @@ struct DisplayInfo: Identifiable {
                 arranged = true
                 break
             }
-            if let origin = virtualPlacement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds),
+            if let origin = virtualPlacement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds, mainDisplay: CGDisplayBounds(CGMainDisplayID()), onLeft: displayPosition == "left"),
                virtualDisplay.arrangeExtendedDisplay(at: origin) {
                 let actual = CGDisplayBounds(id)
                 if actual.origin == origin, VirtualDisplayPlacement.isUsable(origin: actual.origin, size: actual.size, otherDisplays: otherDisplayBounds) {
@@ -632,6 +634,26 @@ struct DisplayInfo: Identifiable {
 
     var wirelessAddresses: [String] { DevicePairing.addresses }
 
+    func setPosition(_ side: String) {
+        guard (side == "left" || side == "right"), !creatingExtendedDisplay else { return }
+        var placement = VirtualDisplayPlacement()
+        if virtualDisplayID != 0, displays.contains(where: { $0.id == virtualDisplayID }) {
+            let bounds = CGDisplayBounds(virtualDisplayID)
+            guard let origin = placement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds,
+                    mainDisplay: CGDisplayBounds(CGMainDisplayID()), onLeft: side == "left"),
+                  virtualDisplay.arrangeExtendedDisplay(at: origin) else {
+                message = virtualDisplay.lastError ?? "Could not reposition the BOOX display."
+                return
+            }
+            placement.arranged(at: origin)
+        }
+        displayPosition = side
+        virtualPlacement = placement
+        if !browserEnabled { UserDefaults.standard.set(side, forKey: "display.position") }
+        saveVirtualDisplayPlacement()
+        message = "BOOX desktop position set to the \(side)."
+    }
+
     func pairBOOX(useWiFi: Bool) {
         guard !browserEnabled, !pairingDevice, !displayAsleep else { return }
         let host: String
@@ -784,7 +806,7 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
+        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {

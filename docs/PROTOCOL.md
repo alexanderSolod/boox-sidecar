@@ -52,6 +52,7 @@ extendedDesktop, wirelessEnabled: Bool
 wirelessAddresses: [String]
 spki_sha256, host_id, capture_session, message: String
 displayAsleep: Bool
+position: "left" | "right"
 ```
 
 `width`/`height` describe the latest encoded frame and can be zero before a frame exists. `displayAsleep` reports that macOS put the display to sleep: capture pauses and automatically resumes on wake, so a receiver should keep its last frame, reduce polling and avoid clearing to a blank screen. `extendedDesktop` means the selected source is the host-created virtual display. `virtualDisplayID=0` means none exists. `spki_sha256` is the public-key pin, not a replacement for bearer authentication. `host_id` is a public, non-secret identity included in authenticated status and Bonjour; `/health` remains only `ok` and `protocol`. `jpegBytes` and `encodeMilliseconds` describe the latest frame, not end-to-end latency. Clients should tolerate additional fields.
@@ -73,7 +74,7 @@ Errors use `{"error":"human readable message"}`. Unknown paths return 404, wrong
 
 ## Display and refresh integration
 
-The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz in extended rather than mirrored mode. It restores a valid saved position or places the virtual display beside the rightmost display. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
+The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz in extended rather than mirrored mode. It restores a valid saved position. Local Left/Right selection replaces that position, preferring the chosen side of the main display and falling back outside the other displays to avoid overlap. Status `position` reports the preferred side. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
 
 The native Android receiver renders bitmaps directly using Canvas, without WebView or JavaScript bridges. Optional refresh controls discover the firmware's public `android.onyx.optimization.EInkHelper` app-scoped APIs and symbolic mode constants. Existing mode is preserved until the user chooses another. **Faster panel…** explicitly requests X mode after explaining reduced detail/ghosting; stream presets never imply waveform changes. Readiness and delayed readback are required because vendor setters may swallow errors. Blocked hidden APIs are not bypassed. Full refresh is offered only when a supported SDK API exists; otherwise direct the user to BOOX E Ink Center. Browser **Reload frame** never means a hardware panel refresh.
 

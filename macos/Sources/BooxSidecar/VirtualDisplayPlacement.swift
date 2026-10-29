@@ -22,13 +22,19 @@ struct VirtualDisplayPlacement {
         savedOrigin.flatMap { try? JSONEncoder().encode(Preference(version: 1, x: $0.x, y: $0.y)) }
     }
 
-    func preferredOrigin(size: CGSize, otherDisplays: [CGRect]) -> CGPoint? {
+    func preferredOrigin(size: CGSize, otherDisplays: [CGRect], mainDisplay: CGRect? = nil, onLeft: Bool = false) -> CGPoint? {
         if let savedOrigin, Self.isUsable(origin: savedOrigin, size: size, otherDisplays: otherDisplays) { return savedOrigin }
-        guard let rightmost = otherDisplays.filter(Self.validBounds).sorted(by: {
-            if $0.maxX != $1.maxX { return $0.maxX > $1.maxX }
+        if let mainDisplay {
+            let origin = CGPoint(x: onLeft ? mainDisplay.minX - size.width : mainDisplay.maxX, y: mainDisplay.minY)
+            if Self.isUsable(origin: origin, size: size, otherDisplays: otherDisplays) { return origin }
+        }
+        guard let outermost = otherDisplays.filter(Self.validBounds).sorted(by: {
+            let first = onLeft ? $0.minX : $0.maxX
+            let second = onLeft ? $1.minX : $1.maxX
+            if first != second { return onLeft ? first < second : first > second }
             return $0.minY < $1.minY
         }).first else { return nil }
-        let origin = CGPoint(x: rightmost.maxX, y: rightmost.minY)
+        let origin = CGPoint(x: onLeft ? outermost.minX - size.width : outermost.maxX, y: outermost.minY)
         return Self.isUsable(origin: origin, size: size, otherDisplays: otherDisplays) ? origin : nil
     }
 
