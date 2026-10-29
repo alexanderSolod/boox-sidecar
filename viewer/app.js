@@ -22,6 +22,7 @@
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
   var initialized = false, knownDisplays = [], cancelDecode = null;
   var inputQueue = [], inputEpoch = 0, inputDraining = false, inputRequest = null, inputMessage = '';
+  var touchGesture = null, lastTouchTap = null, ignoreClickUntil = 0, suppressTouchClick = false, wheelRemainder = 0;
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
@@ -231,6 +232,8 @@
   }
   function clearInput() {
     inputEpoch += 1; inputQueue = []; inputDraining = false;
+    if (touchGesture) suppressTouchClick = true;
+    touchGesture = null; lastTouchTap = null; wheelRemainder = 0;
     if (inputRequest) inputRequest.abort();
     inputRequest = null;
   }
@@ -275,6 +278,27 @@
     }
     if (epoch === inputEpoch) inputDraining = false;
   }
+  function controlling() { return $('control').checked && !$('control').disabled; }
+  function cancelTouch() { touchGesture = null; lastTouchTap = null; suppressTouchClick = true; ignoreClickUntil = inputTime() + 500; }
+  function moveTouch(event) {
+    var gesture = touchGesture;
+    if (!gesture || gesture.id !== event.pointerId) return;
+    var rect = frame.getBoundingClientRect();
+    if (!controlling() || gesture.epoch !== inputEpoch || rect.left !== gesture.rect.left || rect.top !== gesture.rect.top || rect.width !== gesture.rect.width || rect.height !== gesture.rect.height) { cancelTouch(); return; }
+    if (Math.abs(event.clientX - gesture.x) > 8) { gesture.moved = true; lastTouchTap = null; }
+    if (Math.abs(event.clientY - gesture.y) > 8) {
+      if (gesture.kind === 'mouse') gesture.moved = true;
+      else gesture.scrolling = true;
+      lastTouchTap = null;
+    }
+    if (gesture.scrolling) {
+      gesture.remainder += event.clientY - gesture.lastY;
+      gesture.lastY = event.clientY;
+      var delta = Math.trunc(gesture.remainder); gesture.remainder -= delta;
+      if (delta) input({ type: 'scroll', deltaY: delta });
+    }
+    event.preventDefault();
+  }
   $('pairForm').addEventListener('submit', connect);
   $('disconnect').addEventListener('click', function () { stop(true); panel('pairPanel', 'pairButton', true); notice('Disconnected. Paste a session token to reconnect.'); });
   $('pairButton').addEventListener('click', function () { panel('pairPanel', 'pairButton', $('pairPanel').hidden); });
@@ -283,11 +307,58 @@
   $('control').addEventListener('change', function () { if ($('control').checked) { inputMessage = ''; if (status) notice(statusMessage(status)); } updateControls(); });
   $('scrollUp').addEventListener('click', function () { input({ type: 'scroll', deltaY: 300 }); });
   $('scrollDown').addEventListener('click', function () { input({ type: 'scroll', deltaY: -300 }); });
-  $('viewport').addEventListener('click', function (event) { if (event.target !== frame) return; var point = normalizedPoint(frame.getBoundingClientRect(), event.clientX, event.clientY); if (point) input({ type: 'tap', x: point.x, y: point.y }); });
-  $('reload').addEventListener('click', function () { frameRevision += 1; frameID = -1; notice('Requesting the latest frame. Use the BOOX system controls for a hardware screen refresh.'); });
-  $('fit').addEventListener('click', function () { fit = !fit; $('viewport').classList.toggle('actual', !fit); $('fit').setAttribute('aria-pressed', String(fit)); $('fit').textContent = fit ? 'Fit screen' : 'Actual size'; });
+  $('viewport').addEventListener('click', function (event) {
+    if (suppressTouchClick) { suppressTouchClick = false; return; }
+    if (event.target !== frame || inputTime() < ignoreClickUntil) return;
+    var point = normalizedPoint(frame.getBoundingClientRect(), event.clientX, event.clientY);
+    if (point) input({ type: 'tap', x: point.x, y: point.y, clickCount: event.detail === 2 ? 2 : 1 });
+  });
+  $('viewport').addEventListener('wheel', function (event) {
+    if (!controlling() || event.target !== frame) return;
+    var rect = frame.getBoundingClientRect();
+    if (!normalizedPoint(rect, event.clientX, event.clientY)) return;
+    var scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
+    if (!Number.isFinite(event.deltaY)) return;
+    wheelRemainder -= event.deltaY * scale;
+    var delta = Math.trunc(wheelRemainder); wheelRemainder -= delta;
+    if (delta) input({ type: 'scroll', deltaY: delta });
+    event.preventDefault();
+  }, { passive: false });
+  $('viewport').addEventListener('pointerdown', function (event) {
+    var kind = event.pointerType || 'mouse';
+    if (kind === 'mouse' && event.button != null && event.button !== 0) return;
+    if (event.isPrimary === false || touchGesture) { cancelTouch(); return; }
+    if (!controlling() || event.target !== frame) return;
+    var rect = frame.getBoundingClientRect();
+    if (!normalizedPoint(rect, event.clientX, event.clientY)) return;
+    suppressTouchClick = true;
+    touchGesture = { id: event.pointerId, kind: kind, epoch: inputEpoch, rect: rect, x: event.clientX, y: event.clientY, lastY: event.clientY, downAt: inputTime(), remainder: 0, scrolling: false, moved: false };
+    if ($('viewport').setPointerCapture) $('viewport').setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  $('viewport').addEventListener('pointermove', moveTouch);
+  $('viewport').addEventListener('pointerup', function (event) {
+    moveTouch(event);
+    var gesture = touchGesture;
+    if (!gesture || gesture.id !== event.pointerId) return;
+    touchGesture = null; ignoreClickUntil = inputTime() + 500;
+    var point = normalizedPoint(gesture.rect, event.clientX, event.clientY);
+    if (gesture.scrolling && Math.abs(gesture.remainder) >= 0.5) input({ type: 'scroll', deltaY: Math.sign(gesture.remainder) });
+    if (!gesture.scrolling && !gesture.moved && point) {
+      var quick = inputTime() - gesture.downAt < 500;
+      var twice = quick && lastTouchTap && lastTouchTap.kind === gesture.kind && gesture.downAt - lastTouchTap.time <= (gesture.kind === 'mouse' ? 500 : 300)
+        && Math.hypot(gesture.x - lastTouchTap.x, gesture.y - lastTouchTap.y) <= (gesture.kind === 'mouse' ? 5 : 30);
+      lastTouchTap = twice || !quick ? null : { kind: gesture.kind, time: inputTime(), x: event.clientX, y: event.clientY };
+      input({ type: 'tap', x: point.x, y: point.y, clickCount: twice ? 2 : 1 });
+    } else lastTouchTap = null;
+  });
+  $('viewport').addEventListener('pointercancel', cancelTouch);
+  $('viewport').addEventListener('lostpointercapture', function () { if (touchGesture) cancelTouch(); });
+  $('reload').addEventListener('click', function () { clearInput(); frameRevision += 1; frameID = -1; updateControls(); notice('Requesting the latest frame. Use the BOOX system controls for a hardware screen refresh.'); });
+  $('fit').addEventListener('click', function () { clearInput(); fit = !fit; $('viewport').classList.toggle('actual', !fit); $('fit').setAttribute('aria-pressed', String(fit)); $('fit').textContent = fit ? 'Fit screen' : 'Actual size'; });
   $('fullscreen').addEventListener('click', async function () { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else notice('Fullscreen is not supported by this browser.'); } catch (_) { notice('The browser could not enter fullscreen.'); } });
-  document.addEventListener('fullscreenchange', function () { $('fullscreen').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'; });
+  document.addEventListener('fullscreenchange', function () { clearInput(); $('fullscreen').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'; });
+  root.addEventListener('resize', clearInput);
   root.addEventListener('pagehide', function () { stop(false); });
   updateControls();
   var hashToken = tokenFromHash(root.location.hash);

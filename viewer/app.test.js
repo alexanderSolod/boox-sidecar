@@ -49,7 +49,7 @@ function browserHarness(intercept) {
   const storage = new Map();
   const sessionStorage = { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) };
   const status = { protocol: 2, permission: true, capturing: true, inputEnabled: true, width: 1400, height: 900, fps: 60, maxWidth: 1240, grayscale: false, displayID: 1, capture_session: 'session-1' };
-  const window = { document, location: { hash: '', pathname: '/', search: '' }, addEventListener() {} };
+  const window = { document, location: { hash: '', pathname: '/', search: '' }, events: {}, addEventListener(name, callback) { this.events[name] = callback; } };
   const fetch = async (path, options) => {
     calls.push({ path, options });
     if (intercept) { const response = await intercept(path, options, status); if (response !== undefined) return response; }
@@ -63,7 +63,7 @@ function browserHarness(intercept) {
   vm.runInNewContext(fs.readFileSync(require.resolve('./app.js'), 'utf8'), context);
   element('token').value = 'abc'; element('fps').value = '60'; element('maxWidth').value = '1240'; element('grayscale').checked = false;
   const flush = () => new Promise(resolve => setImmediate(resolve));
-  return { element, images, timers, calls, revoked, storage, flush, advance(ms) { now += ms; }, async tick(elapsed = 2500) { now += elapsed; const entry = [...timers.entries()].find(([, value]) => value.ms < 8000); assert.ok(entry, 'a poll is scheduled'); timers.delete(entry[0]); entry[1].callback(); await flush(); }, async connect() { await element('pairForm').events.submit({ preventDefault() {} }); await flush(); } };
+  return { element, images, timers, calls, revoked, storage, flush, window, advance(ms) { now += ms; }, async tick(elapsed = 2500) { now += elapsed; const entry = [...timers.entries()].find(([, value]) => value.ms < 8000); assert.ok(entry, 'a poll is scheduled'); timers.delete(entry[0]); entry[1].callback(); await flush(); }, async connect() { await element('pairForm').events.submit({ preventDefault() {} }); await flush(); } };
 }
 
 test('only one frame is requested while decoding, and disconnect invalidates pending decode', async () => {
@@ -440,4 +440,97 @@ test('uncertain input delivery pauses without retrying the click', async () => {
   assert.equal(h.element('control').checked, false);
   assert.match(h.element('notice').textContent, /could not be confirmed/);
   assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+});
+
+test('double click sends two ordered click pairs with explicit counts', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  for (const detail of [1, 2]) h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100, detail });
+  await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.clickCount), [1, 2]);
+  assert.equal(h.element('viewport').events.dblclick, undefined);
+});
+
+function pointer(h, name, x, y, extra = {}) {
+  h.element('viewport').events[name]({ target: h.element('frame'), pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y, preventDefault() {}, ...extra });
+}
+
+test('touch scroll sends movement before release and suppresses the compatibility click', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  pointer(h, 'pointerdown', 200, 100);
+  pointer(h, 'pointermove', 200, 120); await h.flush();
+  let sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.deltaY), [20]);
+  pointer(h, 'pointerup', 200, 125.7);
+  h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 125.7 });
+  await h.flush();
+  sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.ok(sent.every(event => event.type === 'scroll'));
+  assert.equal(sent.reduce((sum, event) => sum + event.deltaY, 0), 26);
+});
+
+test('touch double tap is immediate and does not duplicate synthesized clicks', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  pointer(h, 'pointerdown', 200, 100); pointer(h, 'pointerup', 200, 100); await h.flush();
+  assert.equal(h.calls.filter(call => call.path === '/api/input').length, 1);
+  h.advance(100);
+  pointer(h, 'pointerdown', 201, 101); pointer(h, 'pointerup', 201, 101);
+  h.element('viewport').events.click({ target: h.element('frame'), clientX: 201, clientY: 101 }); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(sent.map(event => event.clickCount), [1, 2]);
+});
+
+test('wheel scroll preserves fractional deltas and ignores letterboxes', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  const wheel = (x, delta, mode = 0) => h.element('viewport').events.wheel({ target: h.element('frame'), clientX: x, clientY: 100, deltaY: delta, deltaMode: mode, preventDefault() {} });
+  wheel(50, 100); wheel(200, 0.5); wheel(200, 0.5); wheel(200, 2, 1); await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.equal(sent.reduce((sum, event) => sum + event.deltaY, 0), -33);
+});
+
+test('resize and multitouch cancel touch input and double-tap ownership', async () => {
+  for (const cancel of ['resize', 'multitouch']) {
+    const h = browserHarness();
+    await h.connect(); h.images[0].onload(); await h.flush();
+    h.element('control').checked = true; h.element('control').events.change();
+    pointer(h, 'pointerdown', 200, 100);
+    if (cancel === 'resize') h.window.events.resize();
+    else pointer(h, 'pointerdown', 250, 100, { pointerId: 2, isPrimary: false });
+    h.advance(1000);
+    pointer(h, 'pointerup', 200, 100);
+    h.element('viewport').events.click({ target: h.element('frame'), clientX: 200, clientY: 100 }); await h.flush();
+    assert.equal(h.calls.filter(call => call.path === '/api/input').length, 0);
+    pointer(h, 'pointerdown', 200, 100); pointer(h, 'pointerup', 200, 100); await h.flush();
+    const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+    assert.deepEqual(sent.map(event => event.clickCount), [1]);
+  }
+});
+
+test('mouse clicks and double clicks survive frame element replacement', async () => {
+  const h = browserHarness();
+  await h.connect(); h.images[0].onload(); await h.flush();
+  h.element('control').checked = true; h.element('control').events.change();
+  const captures = [];
+  h.element('viewport').setPointerCapture = id => captures.push(id);
+  pointer(h, 'pointerdown', 200, 100, { pointerType: 'mouse', button: 0 });
+  await h.tick(10); h.images[1].onload(); await h.flush();
+  pointer(h, 'pointerup', 200, 100, { pointerType: 'mouse', target: h.element('viewport') });
+  h.element('viewport').events.click({ target: h.element('viewport'), clientX: 200, clientY: 100, detail: 1 });
+  await h.flush();
+  await h.tick(10); h.images[2].onload(); await h.flush();
+  pointer(h, 'pointerdown', 201, 101, { pointerType: 'mouse', button: 0 });
+  pointer(h, 'pointerup', 201, 101, { pointerType: 'mouse', target: h.element('viewport') });
+  h.element('viewport').events.click({ target: h.element('viewport'), clientX: 201, clientY: 101, detail: 1 });
+  await h.flush();
+  const sent = h.calls.filter(call => call.path === '/api/input').map(call => JSON.parse(call.options.body));
+  assert.deepEqual(captures, [1, 1]);
+  assert.deepEqual(sent.map(event => event.clickCount), [1, 2]);
 });

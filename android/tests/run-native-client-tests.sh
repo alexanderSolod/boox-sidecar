@@ -37,6 +37,8 @@ make_fixture -genkeypair -alias test -keyalg RSA -keysize 2048 -storetype PKCS12
   "$project_root/android/tests/SessionCoordinatorTest.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/InputDispatcher.java" \
   "$project_root/android/tests/InputDispatcherTest.java" \
+  "$project_root/android/app/src/main/java/local/boox/sidecar/TouchGesture.java" \
+  "$project_root/android/tests/TouchGestureTest.java" \
   "$project_root/android/tests/NativeClientTest.java"
 "$java_home/bin/java" -cp "$work_dir/classes:$sdk_home/platforms/android-35/android.jar" \
   local.boox.sidecar.NativeClientTest "$work_dir/valid.p12" "$work_dir/expired.p12"
@@ -44,3 +46,5 @@ make_fixture -genkeypair -alias test -keyalg RSA -keysize 2048 -storetype PKCS12
   local.boox.sidecar.SessionCoordinatorTest
 "$java_home/bin/java" -cp "$work_dir/classes:$sdk_home/platforms/android-35/android.jar" \
   local.boox.sidecar.InputDispatcherTest
+"$java_home/bin/java" -cp "$work_dir/classes:$sdk_home/platforms/android-35/android.jar" \
+  local.boox.sidecar.TouchGestureTest

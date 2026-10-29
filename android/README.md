@@ -1,6 +1,6 @@
 # BOOX Sidecar native receiver
 
-This is a dedicated Java Android app, not a browser or WebView. A custom Canvas view displays the Mac's latest JPEG while a single worker handles authenticated HTTP requests and bitmap decoding. USB uses `adb reverse`; both USB and Wi-Fi use HTTPS with a provisioned SHA-256 public-key/SPKI pin.
+This is a dedicated Java Android app, not a browser or WebView. A custom Canvas view displays the Mac's latest JPEG while a frame worker handles authenticated status/frame requests and bitmap decoding. An independent ordered input worker keeps taps responsive during frame transfers. USB uses `adb reverse`; both USB and Wi-Fi use HTTPS with a provisioned SHA-256 public-key/SPKI pin.
 
 The app targets API 35 and supports API 26+. There are no third-party runtime libraries.
 
@@ -37,7 +37,7 @@ Re-run reverse after reconnecting USB or restarting the tablet. For Wi-Fi, keep 
 
 - Fullscreen is on by default. The **Controls** button shows or hides the overlay. Back hides controls, then exits fullscreen, then leaves the app.
 - Streaming defaults to **60 FPS**, **color**, **1240-pixel maximum width**. Select 5/15/30/60 FPS and 1240/1860/2480 widths. The status reports requested FPS separately from frames received. Panel refresh rate and real streaming throughput can be much lower than requested FPS.
-- **Remote input** enables taps and vertical swipes within the displayed image. Letterbox regions are excluded. The Mac also requires local input opt-in and Accessibility permission. Pen pressure and palm rejection are not implemented.
+- **Remote input** enables taps, double-taps and continuous vertical scrolling within the displayed image. Letterbox regions are excluded. The Mac also requires local input opt-in and Accessibility permission. Pen pressure and palm rejection are not implemented.
 - **BOOX refresh mode** probes the actual firmware's public `android.onyx.optimization.EInkHelper` API. Available symbolic modes are Normal, DU, A2, Regal, X and Regal Plus. Mode changes happen only after user selection. A delayed readback confirms the reported mode; exceptions and unavailable services fall back to system controls. Existing BOOX mode is preserved on launch. Fast modes can reduce image detail/color quality.
 - **Full refresh** appears only when the official `EpdController.invalidate(View, UpdateMode.GC)` SDK API is actually available. On firmware without that API, **E Ink Center…** explains how to use BOOX Control Center and offers system settings. The observed Note Air4 C firmware's direct `ViewUpdateHelper.fullRefreshScreen` API is blocked; the app does not bypass Android's hidden-API restrictions or label an ordinary bitmap redraw as a panel refresh.
 
@@ -48,3 +48,5 @@ Official BOOX references: [EPD screen update API](https://github.com/onyx-intl/O
 USB and Wi-Fi use the same certificate-validity and public-key pin checks. Redirects and plaintext endpoints are rejected. Certificate renewal with the same key preserves trust; replacing the key requires pairing again.
 
 The receiver bounds network requests and bitmap queues, discards obsolete capture sessions, and suppresses input when capture is unavailable. It stops its connection while paused and reconnects on resume. When the Mac display sleeps, it keeps the last frame, reduces polling, and releases its screen wake lock while staying connected. Capture resumes after the Mac wakes. Other capture stops, permission errors, and connection failures clear the frame.
+
+A separate input worker sends events in order, with at most 64 pending entries and a two-second queue age limit. Adjacent compatible scrolls accumulate; taps are never overwritten. Overflow, expiry or uncertain delivery pauses remote input until it is enabled again; input is not replayed after failure.

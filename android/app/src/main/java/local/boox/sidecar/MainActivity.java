@@ -534,7 +534,7 @@ public final class MainActivity extends Activity {
                     @Override public void send(InputDispatcher.Event event, String authority) throws Exception {
                         JSONObject payload = new JSONObject().put("capture_session", authority);
                         if (event.scroll) payload.put("type", "scroll").put("deltaY", event.first);
-                        else payload.put("type", "tap").put("x", event.first).put("y", event.second);
+                        else payload.put("type", "tap").put("x", event.first).put("y", event.second).put("clickCount", event.clickCount);
                         control.json("/api/input", payload);
                     }
                     @Override public void cancel() { control.cancel(); }
@@ -549,7 +549,7 @@ public final class MainActivity extends Activity {
         }
         if (inputControl != null && inputControl.isChecked() != remoteInputRequested) inputControl.setChecked(remoteInputRequested);
         frameView.setInput(enabled, new FrameView.InputListener() {
-            @Override public void tap(String authority, double x, double y) { inputDispatcher.tap(owner, authority, x, y); }
+            @Override public void tap(String authority, double x, double y, int clickCount) { inputDispatcher.tap(owner, authority, x, y, clickCount); }
             @Override public void scroll(String authority, double delta) { inputDispatcher.scroll(owner, authority, delta); }
         });
     }

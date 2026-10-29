@@ -24,3 +24,7 @@ swiftc -module-cache-path "$work/module-cache" \
     "$root/macos/Sources/BooxSidecar/HTTPServer.swift" \
     "$root/macos/Tests/SecurityIntegrationTests.swift" -o "$work/security"
 "$work/security"
+swiftc -module-cache-path "$work/module-cache" \
+    "$root/macos/Sources/BooxSidecar/InputEvents.swift" \
+    "$root/macos/Tests/InputEventsTests.swift" -o "$work/input"
+"$work/input"

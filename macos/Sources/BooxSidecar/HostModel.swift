@@ -908,11 +908,11 @@ struct DisplayInfo: Identifiable {
         guard let type = object["type"] as? String else { return .error("Input type required", status: 400) }
         if type == "tap" {
             guard let x = number(object["x"]), let y = number(object["y"]), (0...1).contains(x), (0...1).contains(y) else { return .error("Coordinates must be from 0 to 1", status: 400) }
+            guard let count = InputEvents.clickCount(object["clickCount"]) else { return .error("clickCount must be 1 or 2", status: 400) }
             let bounds = CGDisplayBounds(captureDisplayID)
             let point = CGPoint(x: bounds.minX + x * max(0, bounds.width - 1), y: bounds.minY + y * max(0, bounds.height - 1))
-            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+            guard let events = InputEvents.click(at: point, count: count) else { return .error("Cannot create mouse events", status: 500) }
+            for event in events { event.post(tap: .cghidEventTap) }
         } else if type == "scroll" {
             guard let delta = number(object["deltaY"]), (-1000...1000).contains(delta) else { return .error("deltaY must be from -1000 to 1000", status: 400) }
             let bounds = CGDisplayBounds(captureDisplayID)

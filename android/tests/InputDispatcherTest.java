@@ -20,7 +20,7 @@ public final class InputDispatcherTest {
         f.dispatcher.tap(f.owner, "capture", 0.1, 0.2);
         f.dispatcher.scroll(f.owner, "capture", 800);
         f.dispatcher.scroll(f.owner, "capture", 800);
-        f.dispatcher.tap(f.owner, "capture", 0.3, 0.4);
+        f.dispatcher.tap(f.owner, "capture", 0.3, 0.4, 2);
         f.dispatcher.scroll(f.owner, "capture", -50);
         f.dispatcher.scroll(f.owner, "capture", 30);
         check(f.executor.tasks.size() == 1);
@@ -31,6 +31,7 @@ public final class InputDispatcherTest {
         check(f.sender.events.get(1).first == 1000);
         check(f.sender.events.get(2).first == 600);
         check(!f.sender.events.get(3).scroll && f.sender.events.get(3).first == 0.3);
+        check(f.sender.events.get(3).clickCount == 2);
         check(f.sender.events.get(4).first == -50);
         check(f.sender.events.get(5).first == 30);
         check(f.pauses.isEmpty());
@@ -87,6 +88,17 @@ public final class InputDispatcherTest {
         check(f.pauses.isEmpty());
         check(replacement.events.size() == 1 && replacement.events.get(0).first == 0.5);
         check(f.dispatcher.matches(nextOwner, "next"));
+
+        Fixture churn = new Fixture();
+        Sender latest = null;
+        for (int i = 0; i < 100; i++) {
+            latest = new Sender();
+            churn.dispatcher.activate(churn.owner, "capture", latest);
+            churn.dispatcher.tap(churn.owner, "capture", 0.1, 0.2);
+        }
+        check(churn.executor.tasks.size() == 1);
+        churn.executor.run();
+        check(latest.events.size() == 1 && churn.pauses.isEmpty());
     }
 
     private static final class Fixture {

@@ -19,12 +19,18 @@ final class InputDispatcher {
         final boolean scroll;
         final double first, second;
         final long createdAt;
+        final int clickCount;
 
         Event(boolean scroll, double first, double second, long createdAt) {
+            this(scroll, first, second, createdAt, 1);
+        }
+
+        Event(boolean scroll, double first, double second, long createdAt, int clickCount) {
             this.scroll = scroll;
             this.first = first;
             this.second = second;
             this.createdAt = createdAt;
+            this.clickCount = clickCount;
         }
     }
 
@@ -64,18 +70,21 @@ final class InputDispatcher {
         owner = null;
         captureSession = "";
         queue.clear();
-        draining = false;
     }
 
     void tap(Object owner, String captureSession, double x, double y) {
-        enqueue(owner, captureSession, false, x, y);
+        tap(owner, captureSession, x, y, 1);
+    }
+
+    void tap(Object owner, String captureSession, double x, double y, int clickCount) {
+        if (clickCount == 1 || clickCount == 2) enqueue(owner, captureSession, false, x, y, clickCount);
     }
 
     void scroll(Object owner, String captureSession, double delta) {
-        if (delta != 0) enqueue(owner, captureSession, true, delta, 0);
+        if (delta != 0) enqueue(owner, captureSession, true, delta, 0, 1);
     }
 
-    private synchronized void enqueue(Object owner, String captureSession, boolean scroll, double first, double second) {
+    private synchronized void enqueue(Object owner, String captureSession, boolean scroll, double first, double second, int clickCount) {
         if (!matches(owner, captureSession) || !Double.isFinite(first) || !Double.isFinite(second)) return;
         long now = clock.getAsLong();
         if (!queue.isEmpty() && now - queue.peekFirst().createdAt >= MAX_AGE_MILLIS) {
@@ -90,27 +99,28 @@ final class InputDispatcher {
             queue.addLast(new Event(true, accumulated, 0, tail.createdAt));
         } else {
             if (queue.size() >= CAPACITY) { pause("Too much input is waiting."); return; }
-            queue.addLast(new Event(scroll, first, second, now));
+            queue.addLast(new Event(scroll, first, second, now, clickCount));
         }
         if (!draining) {
             draining = true;
-            long current = epoch;
-            executor.execute(() -> drain(current));
+            executor.execute(this::drain);
         }
     }
 
-    private void drain(long current) {
+    private void drain() {
         while (true) {
             Event event;
             Sender target;
             String capture;
+            long current;
             synchronized (this) {
-                if (current != epoch || sender == null) return;
+                current = epoch;
+                if (sender == null) { draining = false; return; }
                 event = queue.pollFirst();
                 if (event == null) { draining = false; return; }
                 if (clock.getAsLong() - event.createdAt >= MAX_AGE_MILLIS) {
                     pause("Input waited too long.");
-                    return;
+                    continue;
                 }
                 if (event.scroll && Math.abs(event.first) > 1000) {
                     double delta = Math.copySign(1000, event.first);
@@ -125,7 +135,6 @@ final class InputDispatcher {
                 synchronized (this) {
                     if (current == epoch) pause("Input delivery could not be confirmed.");
                 }
-                return;
             }
         }
     }
