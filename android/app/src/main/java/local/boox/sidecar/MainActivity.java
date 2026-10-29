@@ -425,7 +425,12 @@ public final class MainActivity extends Activity {
             PinnedClient.Response response = sessions.captureReady() ? connection.frame(lastFrameID)
                     : new PinnedClient.Response(new byte[0], -1);
             if (response.bytes.length != 0 && isCurrent(session)) {
-                if (!sessions.acceptsCapture(response.captureSession)) throw new Exception("Capture session changed. Reconnecting.");
+                if (!sessions.acceptsCapture(response.captureSession)) {
+                    setCaptureState(session, connection, false, "", sessions.hostAsleep());
+                    nextStatusAt = 0;
+                    if (isCurrent(session) && sessions.owns(session, connection)) worker.schedule(() -> poll(session, pairing, connection, endpoint), 1, TimeUnit.MILLISECONDS);
+                    return;
+                }
                 BitmapFactory.Options bounds = new BitmapFactory.Options();
                 bounds.inJustDecodeBounds = true;
                 BitmapFactory.decodeByteArray(response.bytes, 0, response.bytes.length, bounds);
