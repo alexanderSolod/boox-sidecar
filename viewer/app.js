@@ -174,7 +174,7 @@
           if (displayRevision === frameRevision && !pendingSettings) { knownDisplays = displays.displays; updateDisplay(); }
         }
       }
-      if (status.capturing && status.permission && !pendingSettings) {
+      if (status && status.capturing && status.permission && !pendingSettings) {
         var revision = frameRevision, captureSession = status.capture_session;
         var result = await request('/api/frame?after=' + frameID, {}, run);
         if (run !== generation) return;

@@ -274,6 +274,23 @@ test('frames from a different capture session never enter decoding', async () =>
   assert.equal(h.element('placeholder').hidden, false);
 });
 
+test('a pending settings change after a capture session mismatch is not a connection failure', async () => {
+  let release;
+  const h = browserHarness(path => {
+    if (path.startsWith('/api/frame')) return {
+      ok: true, status: 200, blob: async () => 'old-jpeg',
+      headers: { get: key => key === 'X-Frame-ID' ? '42' : key === 'X-Capture-Session' ? 'obsolete-session' : null }
+    };
+    if (path === '/api/settings') return new Promise(resolve => { release = resolve; });
+  });
+  await h.connect();
+  const change = h.element('fps').events.change({ target: { id: 'fps', value: '15' } });
+  await h.tick();
+  assert.equal(h.element('connection').textContent, 'Connected · live');
+  assert.equal([...h.timers.values()].some(t => t.ms >= 1000 && t.ms < 8000), false, 'no failure backoff is scheduled');
+  release(undefined); await change;
+});
+
 test('a session change cancels an in-progress decode and rejects its late callback', async () => {
   let switched = false;
   const h = browserHarness((path, options, status) => {
