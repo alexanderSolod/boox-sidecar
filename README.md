@@ -72,6 +72,8 @@ See [Android build and connection details](android/README.md). The Mac app uses 
 
 Requires the build tools above, Node.js 22+, and Python 3. Use `--suite browser|mac|android` for one platform or `--gui` for host smoke tests in an interactive macOS desktop session.
 
+The [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), and [implementation plan](docs/PLAN.md) record the v0.3 release.
+
 - Native virtual-display creation uses undocumented CoreGraphics interfaces isolated in an Objective-C target. It is experimental and may break with a macOS update. References/licenses are in [THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md).
 - Portrait desktop presets, pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
 - Wi-Fi requires a route between tablet and Mac; guest/client-isolated networks can prevent it.
