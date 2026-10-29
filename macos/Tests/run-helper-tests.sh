@@ -12,3 +12,7 @@ swiftc -module-cache-path "$work/module-cache" \
     "$root/macos/Sources/BooxSidecar/USBProvisioningState.swift" \
     "$root/macos/Tests/USBProvisioningTests.swift" -o "$work/usb"
 "$work/usb"
+swiftc -module-cache-path "$work/module-cache" \
+    "$root/macos/Sources/BooxSidecar/VirtualDisplayPlacement.swift" \
+    "$root/macos/Tests/VirtualDisplayPlacementTests.swift" -o "$work/placement"
+"$work/placement"

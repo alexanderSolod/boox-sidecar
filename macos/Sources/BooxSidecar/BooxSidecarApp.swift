@@ -114,6 +114,5 @@ struct HostView: View {
             Button("Forget pairing", role: .destructive) { host.forgetPairing() }
             Button("Cancel", role: .cancel) { }
         } message: { Text("This stops sharing and replaces the saved credential. Previously paired devices must be paired again over USB.") }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in host.refreshDisplays() }
     }
 }

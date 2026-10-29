@@ -73,7 +73,7 @@ Errors use `{"error":"human readable message"}`. Unknown paths return 404, wrong
 
 ## Display and refresh integration
 
-The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz arranged to the right in extended rather than mirrored mode. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
+The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz in extended rather than mirrored mode. It restores a valid saved position or places the virtual display beside the rightmost display. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
 
 The native Android receiver renders bitmaps directly using Canvas, without WebView or JavaScript bridges. Optional refresh controls discover the firmware's public `android.onyx.optimization.EInkHelper` app-scoped APIs and symbolic mode constants. Existing mode is preserved until the user chooses another. **Faster panel…** explicitly requests X mode after explaining reduced detail/ghosting; stream presets never imply waveform changes. Readiness and delayed readback are required because vendor setters may swallow errors. Blocked hidden APIs are not bypassed. Full refresh is offered only when a supported SDK API exists; otherwise direct the user to BOOX E Ink Center. Browser **Reload frame** never means a hardware panel refresh.
 

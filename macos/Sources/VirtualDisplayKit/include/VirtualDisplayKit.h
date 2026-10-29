@@ -7,9 +7,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) BOOL available;
 @property(nonatomic, readonly) CGDirectDisplayID displayID;
 @property(nonatomic, readonly, nullable) NSString *lastError;
+@property(nonatomic, copy, nullable) void (^onConfigurationChanged)(void);
 - (CGDirectDisplayID)createExtendedDisplay;
 /// Call after the new display appears in CGGetActiveDisplayList.
-- (BOOL)arrangeExtendedDisplay;
+- (BOOL)arrangeExtendedDisplayAtOrigin:(CGPoint)origin NS_SWIFT_NAME(arrangeExtendedDisplay(at:));
 - (void)removeDisplay;
 @end
 NS_ASSUME_NONNULL_END

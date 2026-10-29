@@ -5,7 +5,7 @@
 - [DeskPad private API header](https://github.com/Stengo/DeskPad/blob/main/DeskPad/CGVirtualDisplayPrivate.h), originally credited to Khaos Tian in the header; repository license below.
 - [Chromium virtual display test utility](https://chromium.googlesource.com/chromium/src/+/HEAD/ui/display/mac/test/virtual_display_util_mac.mm), Copyright 2022 The Chromium Authors; project license below.
 
-This private API is experimental and may change in a macOS update. It is not suitable for Mac App Store distribution. The adapter resolves classes at runtime and checks required selectors before creating a display. It retains the display object until removal or process exit and only changes the new display's arrangement for the current session.
+This private API is experimental and may change in a macOS update. It is not suitable for Mac App Store distribution. The adapter resolves classes at runtime and checks required selectors before creating a display. It retains the display object until removal or process exit and only changes the new display's arrangement, restoring its saved position when available.
 
 ## DeskPad — MIT
 

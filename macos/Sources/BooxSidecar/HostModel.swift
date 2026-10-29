@@ -32,6 +32,7 @@ struct DisplayInfo: Identifiable {
     @Published var fingerprint = ""
     @Published var wirelessMessage = ""
     let virtualDisplay = BXVirtualDisplayController()
+    private var virtualPlacement = VirtualDisplayPlacement()
     @Published private(set) var token: String = ""
     @Published var connecting = false
     @Published var connectionRequested = false
@@ -118,12 +119,16 @@ struct DisplayInfo: Identifiable {
         catch { token = ""; credentialFailure = error.localizedDescription }
         if !browserEnabled {
             let prefs = UserDefaults.standard
+            virtualPlacement = VirtualDisplayPlacement(data: prefs.data(forKey: "virtualDisplay.placement"))
             if let value = prefs.object(forKey: "capture.fps") as? Int, (1...60).contains(value) { fps = value }
             if let value = prefs.object(forKey: "capture.width") as? Int, (600...2480).contains(value) { maxWidth = value }
             if prefs.object(forKey: "capture.grayscale") != nil { grayscale = prefs.bool(forKey: "capture.grayscale") }
             if let value = prefs.object(forKey: "capture.jpegQuality") as? Double, (0.4...0.95).contains(value) { jpegQuality = value }
         }
         refreshDisplays()
+        virtualDisplay.onConfigurationChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.refreshDisplays() }
+        }
         if let credentialFailure { message = credentialFailure; connectionMessage = credentialFailure }
         server.handler = { [weak self] request, reply in
             Task { @MainActor in reply(self?.handle(request) ?? .error("Host unavailable", status: 503)) }
@@ -209,6 +214,30 @@ struct DisplayInfo: Identifiable {
         // A running ScreenCaptureKit stream is authoritative. Legacy preflight
         // can remain stale after permission changes on recent macOS releases.
         if !capturing && !starting { permission = CGPreflightScreenCaptureAccess() }
+        recordVirtualDisplayPlacement()
+    }
+
+    private var otherDisplayBounds: [CGRect] {
+        displays.filter { $0.id != virtualDisplayID }.map { CGDisplayBounds($0.id) }
+    }
+
+    private func recordVirtualDisplayPlacement() {
+        guard !creatingExtendedDisplay, virtualDisplayID != 0, virtualDisplayID == virtualDisplay.displayID,
+              CGDisplayIsActive(virtualDisplayID) != 0, CGDisplayMirrorsDisplay(virtualDisplayID) == 0 else { return }
+        let bounds = CGDisplayBounds(virtualDisplayID)
+        let previous = virtualPlacement.savedOrigin
+        virtualPlacement.observe(origin: bounds.origin, size: bounds.size, otherDisplays: otherDisplayBounds)
+        if previous != virtualPlacement.savedOrigin { saveVirtualDisplayPlacement() }
+    }
+
+    private func saveVirtualDisplayPlacement() {
+        if !browserEnabled, let data = virtualPlacement.data { UserDefaults.standard.set(data, forKey: "virtualDisplay.placement") }
+    }
+
+    private func releaseVirtualDisplay() {
+        virtualPlacement.removed()
+        virtualDisplay.removeDisplay()
+        virtualDisplayID = 0
     }
 
     func createExtendedDisplay(requestPermission: Bool = true) async {
@@ -222,11 +251,13 @@ struct DisplayInfo: Identifiable {
     private func prepareExtendedDisplay(requestPermission: Bool = true) async {
         guard !creatingExtendedDisplay, !demo, !displayAsleep, !Task.isCancelled else { return }
         let attempt = connectionGeneration
+        recordVirtualDisplayPlacement()
+        let existing = virtualDisplay.displayID != 0
         creatingExtendedDisplay = true
         defer {
             creatingExtendedDisplay = false
             if Task.isCancelled || connectionGeneration != attempt {
-                stopCapture(); virtualDisplay.removeDisplay(); virtualDisplayID = 0; refreshDisplays()
+                stopCapture(); releaseVirtualDisplay(); refreshDisplays()
             }
         }
         let id = virtualDisplay.createExtendedDisplay()
@@ -240,7 +271,7 @@ struct DisplayInfo: Identifiable {
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard displays.contains(where: { $0.id == id }) else {
-            virtualDisplay.removeDisplay(); virtualDisplayID = 0
+            releaseVirtualDisplay()
             message = "The new display did not become available. Try creating it again."
             return
         }
@@ -249,19 +280,34 @@ struct DisplayInfo: Identifiable {
         var arranged = false
         for _ in 0..<20 {
             if Task.isCancelled || connectionGeneration != attempt { return }
-            if virtualDisplay.arrangeExtendedDisplay() { arranged = true; break }
+            let bounds = CGDisplayBounds(id)
+            if existing, CGDisplayMirrorsDisplay(id) == 0,
+               VirtualDisplayPlacement.isUsable(origin: bounds.origin, size: bounds.size, otherDisplays: otherDisplayBounds) {
+                arranged = true
+                break
+            }
+            if let origin = virtualPlacement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds),
+               virtualDisplay.arrangeExtendedDisplay(at: origin) {
+                let actual = CGDisplayBounds(id)
+                if actual.origin == origin, VirtualDisplayPlacement.isUsable(origin: actual.origin, size: actual.size, otherDisplays: otherDisplayBounds) {
+                    arranged = true
+                    break
+                }
+            }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard arranged else {
             let failure = virtualDisplay.lastError ?? "Could not arrange the extended desktop."
-            virtualDisplay.removeDisplay(); virtualDisplayID = 0
+            releaseVirtualDisplay()
             refreshDisplays()
             message = failure
             return
         }
+        virtualPlacement.arranged(at: CGDisplayBounds(id).origin)
+        saveVirtualDisplayPlacement()
         if capturing || starting { stopCapture() }
         displayID = id
-        message = "Extended desktop created to the right of your main display. Move windows onto it."
+        message = "Extended desktop ready. Move windows onto it using your display arrangement."
         try? await Task.sleep(nanoseconds: 300_000_000)
         guard !Task.isCancelled, connectionGeneration == attempt else { return }
         if requestPermission || CGPreflightScreenCaptureAccess() { startCapture() }
@@ -270,9 +316,9 @@ struct DisplayInfo: Identifiable {
 
     func removeExtendedDisplay() {
         guard !creatingExtendedDisplay else { return }
+        recordVirtualDisplayPlacement()
         if displayID == virtualDisplayID || resumeTarget?.extended == true { stop() }
-        virtualDisplay.removeDisplay()
-        virtualDisplayID = 0
+        releaseVirtualDisplay()
         refreshDisplays()
         message = "BOOX extended display removed."
     }
@@ -436,8 +482,7 @@ struct DisplayInfo: Identifiable {
                         displayID = target.displayID
                         startCapture()
                     } else {
-                        virtualDisplay.removeDisplay()
-                        virtualDisplayID = 0
+                        releaseVirtualDisplay()
                         await prepareExtendedDisplay(requestPermission: false)
                     }
                 } else {
