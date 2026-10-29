@@ -99,7 +99,7 @@
     }
 }
 
-- (BOOL)arrangeExtendedDisplay {
+- (BOOL)arrangeExtendedDisplayOnSide:(BXDisplaySide)side {
     NSAssert([NSThread isMainThread], @"Arrange displays on the main thread");
     _lastError = nil;
     CGDirectDisplayID displayID = self.displayID;
@@ -125,7 +125,9 @@
         if (result == kCGErrorSuccess) {
             step = @"set desktop position";
             CGRect mainBounds = CGDisplayBounds(CGMainDisplayID());
-            result = CGConfigureDisplayOrigin(config, displayID, (int32_t)CGRectGetMaxX(mainBounds), (int32_t)CGRectGetMinY(mainBounds));
+            CGFloat x = CGRectGetMaxX(mainBounds);
+            if (side == BXDisplaySideLeft) x = CGRectGetMinX(mainBounds) - CGDisplayBounds(displayID).size.width;
+            result = CGConfigureDisplayOrigin(config, displayID, (int32_t)x, (int32_t)CGRectGetMinY(mainBounds));
         }
         if (result == kCGErrorSuccess) {
             step = @"commit session arrangement";

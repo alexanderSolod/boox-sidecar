@@ -46,6 +46,7 @@ extendedDesktop, wirelessEnabled: Bool
 wirelessAddresses: [String]
 fingerprint, host_id, message: String
 displayAsleep: Bool
+position: "left" | "right"
 ```
 
 `width`/`height` describe the latest encoded frame and can be zero before a frame exists. `displayAsleep` reports that macOS put the display to sleep: capture pauses and automatically resumes on wake, so a receiver should keep its last frame, reduce polling and avoid clearing to a blank screen. `extendedDesktop` means the selected source is the host-created virtual display. `virtualDisplayID=0` means none exists. `fingerprint` is public certificate identity, not a replacement for bearer authentication. `host_id` is a public, non-secret identity included in authenticated status and Bonjour; `/health` remains only `ok` and `protocol`. `jpegBytes` and `encodeMilliseconds` describe the latest frame, not end-to-end latency. Clients should tolerate additional fields.

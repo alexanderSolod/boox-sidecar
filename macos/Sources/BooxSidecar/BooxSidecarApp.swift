@@ -58,6 +58,15 @@ struct HostView: View {
                             ForEach(["Speed", "Balanced", "Sharp text"], id: \.self) { profile in Button(profile) { host.applyProfile(profile) } }
                             Spacer()
                         }
+                        HStack {
+                            Text("BOOX desktop")
+                            Picker("BOOX desktop", selection: Binding(get: { host.displayPosition }, set: { host.setPosition($0) })) {
+                                Text("◀ Left").tag("left")
+                                Text("Right ▶").tag("right")
+                            }.pickerStyle(.segmented).labelsHidden().frame(width: 170)
+                            Text("of your main display").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                        }
                         Text("\(host.maxWidth) px · \(host.fps) capture FPS · \(host.grayscale ? "Grayscale" : "Color") · JPEG \(Int(host.jpegQuality * 100))%")
                             .font(.callout).foregroundStyle(.secondary)
                         Text("1240 px matches the panel's color resolution. Sharp text uses the full 2480 px black-and-white resolution. E-ink refresh speed depends on the BOOX refresh mode; capture FPS is not panel FPS.").font(.caption).foregroundStyle(.secondary)
