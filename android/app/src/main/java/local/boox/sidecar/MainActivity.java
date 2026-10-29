@@ -9,6 +9,7 @@ import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.os.Build;
+import android.os.PowerManager;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -73,6 +74,9 @@ public final class MainActivity extends Activity {
     private long lastConnectRequest;
     private MacDiscovery discovery;
     private ConnectivityManager connectivity;
+    private PowerManager powerManager;
+    private PowerManager.WakeLock cpuLock;
+    private PowerManager.WakeLock screenLock;
     private ConnectivityManager.NetworkCallback networkCallback;
     private BroadcastReceiver powerReceiver;
     private CheckBox colorControl;
@@ -100,6 +104,7 @@ public final class MainActivity extends Activity {
         jpegQuality = Math.max(0.4, Math.min(0.95, preferences.getFloat("jpegQuality", 0.70f)));
         discovery = new MacDiscovery(this);
         connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        powerManager = (PowerManager) getSystemService(POWER_SERVICE);
         maxWidth = Math.max(600, Math.min(2480, maxWidth));
         acceptProvisioning(getIntent());
         buildUi();
@@ -500,7 +505,9 @@ public final class MainActivity extends Activity {
                 if (!isCurrent(session)) return;
                 validateHost(pairing, result);
                 adoptHostSettings(session, result);
+                boolean wasAsleep = hostAsleep;
                 hostAsleep = result.optBoolean("displayAsleep", false);
+                if (wasAsleep != hostAsleep) ui.post(this::updateScreenLock);
                 setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing") && !hostAsleep);
                 if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
                 hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
@@ -707,6 +714,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         startNetworkMonitoring();
+        acquireWakeLocks();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         startSession();
     }
@@ -716,8 +724,56 @@ public final class MainActivity extends Activity {
         stopNetworkMonitoring();
         discovery.stop();
         stopSession();
+        releaseWakeLocks();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
+    }
+
+    // FLAG_KEEP_SCREEN_ON is not honored by some Onyx builds; real wake locks
+    // are. A partial lock keeps the poll worker alive if the display sleeps so
+    // a Mac wake is still detected; the screen lock is dropped while the Mac
+    // display sleeps so the tablet can idle down, and ACQUIRE_CAUSES_WAKEUP
+    // brings it back on wake.
+    @SuppressWarnings("deprecation")
+    private void acquireWakeLocks() {
+        if (powerManager == null) return;
+        if (cpuLock == null) {
+            cpuLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "boox:stream");
+            cpuLock.setReferenceCounted(false);
+            cpuLock.acquire();
+        }
+        updateScreenLock();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void updateScreenLock() {
+        if (powerManager == null) return;
+        if (resumed && !hostAsleep) {
+            if (screenLock == null || !screenLock.isHeld()) {
+                releaseScreenLock();
+                screenLock = powerManager.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                        | PowerManager.ACQUIRE_CAUSES_WAKEUP, "boox:display");
+                screenLock.setReferenceCounted(false);
+                screenLock.acquire();
+            }
+        } else {
+            releaseScreenLock();
+        }
+    }
+
+    private void releaseScreenLock() {
+        if (screenLock != null) {
+            if (screenLock.isHeld()) screenLock.release();
+            screenLock = null;
+        }
+    }
+
+    private void releaseWakeLocks() {
+        releaseScreenLock();
+        if (cpuLock != null) {
+            if (cpuLock.isHeld()) cpuLock.release();
+            cpuLock = null;
+        }
     }
 
     @Override public void onBackPressed() {
