@@ -38,11 +38,17 @@ struct DisplayInfo: Identifiable {
     @Published var connectionMessage = "Open the BOOX app, then click Connect. First-time pairing needs USB."
     @Published var wirelessStarting = false
     @Published var displayAsleep = false
-    private var sleepWasSharing = false
+    private struct ResumeTarget {
+        let displayID: CGDirectDisplayID
+        let extended: Bool
+        let connected: Bool
+    }
+    private var resumeTarget: ResumeTarget?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let credentialStore: PairingCredentialStore?
     private let advertiser = BonjourAdvertiser()
     private var connectionTask: Task<Void, Never>?
+    private var manualPairingTask: Task<Void, Never>?
     private var usbWatcher: Task<Void, Never>?
     private var usbProvisioning = USBProvisioningState()
     private var connectionGeneration = 0
@@ -140,50 +146,52 @@ struct DisplayInfo: Identifiable {
             Task { await createExtendedDisplay(requestPermission: false) }
         }
         let center = NSWorkspace.shared.notificationCenter
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidSleep() }
-        })
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidWake() }
-        })
-        // System sleep wakes through a different notification than display sleep.
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidWake() }
-        })
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.displayDidSleep() }
+            })
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.displayDidWake() }
+            })
+        }
     }
 
     deinit { workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) } }
 
     private func displayDidSleep() {
+        guard !displayAsleep else { return }
         displayAsleep = true
-        sleepWasSharing = connectionRequested || capturing || starting
-        if capturing || starting {
-            stop()
-            message = "Display asleep. Sharing pauses until the display wakes."
+        if resumeTarget == nil, capturing || starting || connecting || creatingExtendedDisplay {
+            let selected = captureDisplayID ?? displayID
+            resumeTarget = ResumeTarget(displayID: selected,
+                extended: creatingExtendedDisplay || (connecting && captureDisplayID == nil)
+                    || (virtualDisplayID != 0 && selected == virtualDisplayID),
+                connected: connectionRequested)
         }
+        cancelConnectionWork()
+        stopCapture()
+        message = "Display asleep. Sharing pauses until the display wakes."
+        connectionMessage = message
     }
 
     private func displayDidWake() {
+        guard displayAsleep else { return }
         displayAsleep = false
-        refreshDisplays()
-        let virtualAlive = virtualDisplayID != 0 && displays.contains(where: { $0.id == virtualDisplayID })
-        if connectionRequested {
-            if virtualAlive {
-                displayID = virtualDisplayID
-                // A ScreenCaptureKit stream can silently die across sleep;
-                // always rebuild it rather than trusting a stale flag.
-                if capturing || starting { stop() }
-                start()
-            } else {
-                virtualDisplayID = 0
-                if demo { start() }
-                else { Task { await createExtendedDisplay(requestPermission: false) } }
-            }
-        } else if sleepWasSharing {
-            if capturing || starting { stop() }
-            start()
+        guard refreshTLSIdentity() else {
+            resumeTarget = nil
+            connectionRequested = false
+            connectionMessage = "Sharing could not resume. " + wirelessMessage
+            return
         }
-        sleepWasSharing = false
+        refreshDisplays()
+        guard let target = resumeTarget else {
+            if message == "Display asleep. Sharing pauses until the display wakes." { message = "Sharing stopped." }
+            if connectionMessage == "Display asleep. Sharing pauses until the display wakes." { connectionMessage = "Click Connect to share a display." }
+            return
+        }
+        beginConnection(resuming: target)
     }
 
     func refreshDisplays() {
@@ -204,12 +212,21 @@ struct DisplayInfo: Identifiable {
     }
 
     func createExtendedDisplay(requestPermission: Bool = true) async {
-        guard !creatingExtendedDisplay, !demo else { return }
+        guard !creatingExtendedDisplay, !demo, !displayAsleep, !Task.isCancelled else { return }
+        resumeTarget = nil
+        cancelConnectionWork()
+        connectionRequested = false
+        await prepareExtendedDisplay(requestPermission: requestPermission)
+    }
+
+    private func prepareExtendedDisplay(requestPermission: Bool = true) async {
+        guard !creatingExtendedDisplay, !demo, !displayAsleep, !Task.isCancelled else { return }
+        let attempt = connectionGeneration
         creatingExtendedDisplay = true
         defer {
             creatingExtendedDisplay = false
-            if Task.isCancelled {
-                stop(); virtualDisplay.removeDisplay(); virtualDisplayID = 0; refreshDisplays()
+            if Task.isCancelled || connectionGeneration != attempt {
+                stopCapture(); virtualDisplay.removeDisplay(); virtualDisplayID = 0; refreshDisplays()
             }
         }
         let id = virtualDisplay.createExtendedDisplay()
@@ -217,7 +234,7 @@ struct DisplayInfo: Identifiable {
         virtualDisplayID = id
         // WindowServer and ScreenCaptureKit discover new displays asynchronously.
         for _ in 0..<20 {
-            if Task.isCancelled { return }
+            if Task.isCancelled || connectionGeneration != attempt { return }
             refreshDisplays()
             if displays.contains(where: { $0.id == id }) { break }
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -231,7 +248,7 @@ struct DisplayInfo: Identifiable {
         // finish publishing it before committing its session-only arrangement.
         var arranged = false
         for _ in 0..<20 {
-            if Task.isCancelled { return }
+            if Task.isCancelled || connectionGeneration != attempt { return }
             if virtualDisplay.arrangeExtendedDisplay() { arranged = true; break }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
@@ -242,18 +259,18 @@ struct DisplayInfo: Identifiable {
             message = failure
             return
         }
-        if capturing || starting { stop() }
+        if capturing || starting { stopCapture() }
         displayID = id
         message = "Extended desktop created to the right of your main display. Move windows onto it."
         try? await Task.sleep(nanoseconds: 300_000_000)
-        guard !Task.isCancelled else { return }
-        if requestPermission || CGPreflightScreenCaptureAccess() { start() }
+        guard !Task.isCancelled, connectionGeneration == attempt else { return }
+        if requestPermission || CGPreflightScreenCaptureAccess() { startCapture() }
         else { message = "Extended desktop is ready. Click Start capture to grant Screen Recording permission." }
     }
 
     func removeExtendedDisplay() {
         guard !creatingExtendedDisplay else { return }
-        if displayID == virtualDisplayID { stop() }
+        if displayID == virtualDisplayID || resumeTarget?.extended == true { stop() }
         virtualDisplay.removeDisplay()
         virtualDisplayID = 0
         refreshDisplays()
@@ -281,8 +298,9 @@ struct DisplayInfo: Identifiable {
         }
     }
 
-    private func refreshTLSIdentity() {
-        guard !browserEnabled, configurationError == nil else { return }
+    @discardableResult private func refreshTLSIdentity() -> Bool {
+        guard configurationError == nil else { return false }
+        if browserEnabled { return true }
         defer { scheduleTLSMaintenance() }
         do {
             let refreshed = try TLSIdentity.load(directory: tlsDirectory)
@@ -297,6 +315,7 @@ struct DisplayInfo: Identifiable {
                 if restoreWiFi { enableWireless(false); enableWireless(true) }
             }
             if let warning = refreshed.renewalError { wirelessMessage = warning }
+            return true
         } catch {
             wirelessMessage = "TLS renewal failed: " + error.localizedDescription
             if tlsIdentity?.valid(at: Date()) != true {
@@ -307,6 +326,7 @@ struct DisplayInfo: Identifiable {
                 tlsIdentity = nil
                 message = "Secure connections stopped because the TLS identity expired. " + error.localizedDescription
             }
+            return false
         }
     }
 
@@ -359,80 +379,142 @@ struct DisplayInfo: Identifiable {
     }
 
     func connect() {
-        guard !connecting, !token.isEmpty else { return }
+        guard !connecting, !token.isEmpty, !displayAsleep else { return }
+        resumeTarget = nil
+        beginConnection()
+    }
+
+    private func beginConnection(resuming target: ResumeTarget? = nil) {
+        guard !token.isEmpty, !displayAsleep else { return }
+        cancelConnectionWork()
+        connectionRequested = target?.connected ?? true
         if demo {
-            connectionRequested = true
             if !capturing { startDemo() }
+            resumeTarget = nil
             connectionMessage = "Synthetic demo is ready. No BOOX pairing or screen capture is performed."
             return
         }
-        if developmentBrowser {
-            connectionRequested = true
-            start()
+        if developmentBrowser && target == nil {
+            startCapture()
             return
         }
-        connectionRequested = true
         connecting = true
-        connectionGeneration += 1
         let attempt = connectionGeneration
-        connectionMessage = "Preparing your BOOX desktop…"
-        connectionTask?.cancel()
-        usbWatcher?.cancel()
-        usbWatcher = nil
+        connectionMessage = target == nil ? "Preparing your BOOX desktop…" : "Resuming the shared display…"
         connectionTask = Task { [self] in
-            defer { if connectionGeneration == attempt { connecting = false } }
+            defer {
+                if connectionGeneration == attempt {
+                    connecting = false
+                    connectionTask = nil
+                    resumeTarget = nil
+                }
+            }
             for _ in 0..<30 {
+                guard connectionIsCurrent(attempt) else { return }
                 if serverReady { break }
-                if Task.isCancelled { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard connectionIsCurrent(attempt) else { return }
             guard serverReady else { connectionRequested = false; connectionMessage = "The local server is unavailable. " + message; return }
-            if UserDefaults.standard.object(forKey: "wireless.enabled") as? Bool ?? true { enableWireless(true) }
-            if demo { start() } else { await createExtendedDisplay() }
-            for _ in 0..<100 {
-                if !starting || Task.isCancelled { break }
+            while creatingExtendedDisplay {
+                guard connectionIsCurrent(attempt) else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled, connectionRequested else { return }
+            guard connectionIsCurrent(attempt) else { return }
+            guard browserEnabled || tlsIdentity?.valid(at: Date()) == true else {
+                stop()
+                connectionMessage = "Sharing requires a valid TLS identity."
+                return
+            }
+            if connectionRequested, UserDefaults.standard.object(forKey: "wireless.enabled") as? Bool ?? true { enableWireless(true) }
+            if let target {
+                refreshDisplays()
+                if target.extended {
+                    if target.displayID != 0, target.displayID == virtualDisplay.displayID,
+                       displays.contains(where: { $0.id == target.displayID }) {
+                        virtualDisplayID = target.displayID
+                        displayID = target.displayID
+                        startCapture()
+                    } else {
+                        virtualDisplay.removeDisplay()
+                        virtualDisplayID = 0
+                        await prepareExtendedDisplay(requestPermission: false)
+                    }
+                } else {
+                    for _ in 0..<20 {
+                        guard connectionIsCurrent(attempt) else { return }
+                        refreshDisplays()
+                        if displays.contains(where: { $0.id == target.displayID }) { break }
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                    }
+                    guard connectionIsCurrent(attempt) else { return }
+                    refreshDisplays()
+                    guard displays.contains(where: { $0.id == target.displayID }) else {
+                        connectionRequested = false
+                        message = "The shared display is unavailable. Choose a display and start sharing again."
+                        connectionMessage = message
+                        return
+                    }
+                    displayID = target.displayID
+                    startCapture()
+                }
+            } else { await prepareExtendedDisplay() }
+            for _ in 0..<100 {
+                guard connectionIsCurrent(attempt) else { return }
+                if !starting { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard connectionIsCurrent(attempt) else { return }
             if starting {
-                stop(); connectionRequested = false
+                stopCapture(); connectionRequested = false
                 connectionMessage = "macOS is still waiting to start capture. Finish any Screen Recording permission prompt, then click Connect again."
                 return
             }
             guard capturing else { connectionRequested = false; connectionMessage = message; return }
+            guard connectionRequested else { connectionMessage = "Sharing resumed."; return }
             for _ in 0..<100 {
-                if !wirelessStarting || Task.isCancelled { break }
+                guard connectionIsCurrent(attempt) else { return }
+                if !wirelessStarting { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled else { return }
-            await checkUSB(explicit: true)
-            guard !Task.isCancelled, connectionRequested else { return }
-            usbWatcher?.cancel()
+            guard connectionIsCurrent(attempt) else { return }
+            await checkUSB(explicit: target == nil)
+            guard connectionIsCurrent(attempt), connectionRequested else { return }
             usbWatcher = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    guard let self, !Task.isCancelled, self.connectionRequested else { return }
+                    guard let self, self.connectionIsCurrent(attempt), self.connectionRequested else { return }
                     await self.checkUSB(explicit: false)
                 }
             }
+            if target != nil { connectionMessage = "Sharing resumed." }
         }
     }
 
-    func disconnect() {
-        connectionRequested = false
+    private func connectionIsCurrent(_ attempt: Int) -> Bool {
+        connectionGeneration == attempt && !displayAsleep && !Task.isCancelled
+    }
+
+    private func cancelConnectionWork() {
         connectionGeneration += 1
-        connectionTask?.cancel(); connectionTask = nil
-        usbWatcher?.cancel(); usbWatcher = nil
-        usbProvisioning = USBProvisioningState()
+        connectionTask?.cancel()
+        connectionTask = nil
+        manualPairingTask?.cancel()
+        usbWatcher?.cancel()
+        usbWatcher = nil
         connecting = false
+    }
+
+    func disconnect() {
         stop()
+        usbProvisioning = USBProvisioningState()
         enableWireless(false)
         if !creatingExtendedDisplay { removeExtendedDisplay() }
         connectionMessage = "Disconnected. Pairing is remembered for next time."
     }
 
     private func checkUSB(explicit: Bool) async {
-        guard !browserEnabled, !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice, connectionRequested, !displayAsleep, !Task.isCancelled else { return }
         pairingDevice = true
         defer { pairingDevice = false }
         let attempt = connectionGeneration
@@ -506,7 +588,7 @@ struct DisplayInfo: Identifiable {
     var wirelessAddresses: [String] { DevicePairing.addresses }
 
     func pairBOOX(useWiFi: Bool) {
-        guard !browserEnabled, !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice, !displayAsleep else { return }
         let host: String
         let certificate: String?
         if useWiFi {
@@ -518,23 +600,40 @@ struct DisplayInfo: Identifiable {
             certificate = fingerprint
         } else { host = "https://127.0.0.1:\(port)"; certificate = fingerprint.isEmpty ? nil : fingerprint }
         pairingDevice = true
+        let attempt = connectionGeneration
         let pairPort = port, pairToken = token, pairID = hostID
         let wifiHost = wirelessAddresses.first.map { "https://\($0):\(wifiPort)" }
-        Task {
+        manualPairingTask = Task {
+            defer {
+                pairingDevice = false
+                manualPairingTask = nil
+            }
             do {
-                try await Task.detached(priority: .userInitiated) {
+                let worker = Task.detached(priority: .userInitiated) {
                     try DevicePairing.pair(port: pairPort, host: host, token: pairToken, fingerprint: certificate, hostID: pairID, preferUSB: !useWiFi, wifiHost: wifiHost)
-                }.value
+                }
+                try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard connectionGeneration == attempt, !Task.isCancelled else { return }
                 message = useWiFi ? "Wi-Fi pairing sent to the BOOX app. Confirm it connects, then unplug USB." : "USB pairing sent to the BOOX app."
-            } catch { message = error.localizedDescription }
-            pairingDevice = false
+            } catch {
+                guard connectionGeneration == attempt, !Task.isCancelled else { return }
+                message = error.localizedDescription
+            }
         }
     }
 
     func copyFingerprint() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(fingerprint, forType: .string) }
 
     func start() {
-        guard !starting, !capturing else { return }
+        guard !starting, !capturing, !creatingExtendedDisplay, !displayAsleep else { return }
+        resumeTarget = nil
+        cancelConnectionWork()
+        connectionRequested = false
+        startCapture()
+    }
+
+    private func startCapture() {
+        guard !starting, !capturing, !displayAsleep else { return }
         if demo { startDemo(); return }
         // An explicit Start request reaches ScreenCaptureKit directly. Its
         // SCShareableContent/SCStream calls enforce consent and can present the
@@ -559,6 +658,7 @@ struct DisplayInfo: Identifiable {
                 guard let self, self.generation == currentGeneration else { return }
                 self.stop()
                 self.message = "Capture stopped: \(text)"
+                self.connectionMessage = self.message
             }
         }
         let id = displayID, rate = fps, width = maxWidth, gray = grayscale, quality = jpegQuality
@@ -577,11 +677,19 @@ struct DisplayInfo: Identifiable {
                 permission = CGPreflightScreenCaptureAccess()
                 let failure = error as NSError
                 message = "ScreenCaptureKit failed (\(failure.domain), \(failure.code)): \(error.localizedDescription)"
+                connectionMessage = message
             }
         }
     }
 
     func stop() {
+        resumeTarget = nil
+        connectionRequested = false
+        cancelConnectionWork()
+        stopCapture()
+    }
+
+    private func stopCapture() {
         sharingAuthority.invalidate()
         captureSession = ""
         server.cancelSensitiveConnections()
@@ -599,6 +707,15 @@ struct DisplayInfo: Identifiable {
         Task { await oldCapture?.stop() }
     }
 
+    func selectDisplay(_ id: CGDirectDisplayID) {
+        guard id != displayID else { return }
+        displayID = id
+        if displayAsleep || resumeTarget != nil || creatingExtendedDisplay || (connecting && !capturing) {
+            stop()
+            connectionMessage = "Display selected. Click Start capture when ready."
+        } else { applySettings() }
+    }
+
     func applySettings() {
         if !browserEnabled {
             let prefs = UserDefaults.standard
@@ -607,7 +724,7 @@ struct DisplayInfo: Identifiable {
             prefs.set(grayscale, forKey: "capture.grayscale")
             prefs.set(jpegQuality, forKey: "capture.jpegQuality")
         }
-        if capturing || starting { stop(); start() }
+        if capturing || starting { stopCapture(); startCapture() }
     }
 
     func enableInput(_ enabled: Bool) {

@@ -68,7 +68,7 @@ struct HostView: View {
                 DisclosureGroup("Advanced controls", isExpanded: $advanced) {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {
-                            Picker("Display", selection: Binding(get: { host.displayID }, set: { host.displayID = $0; host.applySettings() })) {
+                            Picker("Display", selection: Binding(get: { host.displayID }, set: { host.selectDisplay($0) })) {
                                 ForEach(host.displays) { display in Text("\(display.name) · \(display.width) × \(display.height)").tag(display.id) }
                             }
                             Button { host.refreshDisplays() } label: { Image(systemName: "arrow.clockwise") }
@@ -85,7 +85,7 @@ struct HostView: View {
                         }
                         HStack {
                             Button("Start capture") { host.start() }.disabled(host.capturing || host.starting || !host.serverReady)
-                            Button("Stop capture") { host.stop() }.disabled(!host.capturing && !host.starting)
+                            Button("Stop capture") { host.stop() }.disabled(!host.capturing && !host.starting && !host.displayAsleep)
                             Button("Create BOOX display") { Task { await host.createExtendedDisplay() } }.disabled(host.creatingExtendedDisplay || host.demo || !host.virtualDisplay.available)
                             Button("Remove display") { host.removeExtendedDisplay() }.disabled(host.virtualDisplayID == 0 || host.creatingExtendedDisplay)
                         }

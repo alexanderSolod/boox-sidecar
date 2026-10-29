@@ -32,6 +32,10 @@ make_fixture -genkeypair -alias test -keyalg RSA -keysize 2048 -storetype PKCS12
   "$project_root/android/app/src/main/java/local/boox/sidecar/PinnedClient.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/CaptureSessionState.java" \
   "$project_root/android/app/src/main/java/local/boox/sidecar/AutoRoutePolicy.java" \
+  "$project_root/android/app/src/main/java/local/boox/sidecar/SessionCoordinator.java" \
+  "$project_root/android/tests/SessionCoordinatorTest.java" \
   "$project_root/android/tests/NativeClientTest.java"
 "$java_home/bin/java" -cp "$work_dir/classes:$sdk_home/platforms/android-35/android.jar" \
   local.boox.sidecar.NativeClientTest "$work_dir/valid.p12" "$work_dir/expired.p12"
+"$java_home/bin/java" -cp "$work_dir/classes:$sdk_home/platforms/android-35/android.jar" \
+  local.boox.sidecar.SessionCoordinatorTest
