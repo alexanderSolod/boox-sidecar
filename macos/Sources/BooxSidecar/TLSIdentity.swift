@@ -20,6 +20,11 @@ struct TLSIdentity {
         guard #available(macOS 15.0, *) else { throw failure("Secure native connections require macOS 15 or later.") }
         let root = directory ?? PairingCredentialStore.applicationDirectory.appendingPathComponent("TLS", isDirectory: true)
         try PrivateIdentityFiles.prepare(root)
+        let lock = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard lock >= 0 else { throw failure("Could not open the local TLS identity directory.") }
+        defer { close(lock) }
+        guard flock(lock, LOCK_EX) == 0 else { throw failure("Could not lock the local TLS identity directory.") }
+        discardStaging(in: root)
         let bundle = root.appendingPathComponent("identity.p12")
         let stage = root.appendingPathComponent(".tls-" + UUID().uuidString, isDirectory: true)
         try PrivateIdentityFiles.prepare(stage)
@@ -29,7 +34,10 @@ struct TLSIdentity {
         if try PrivateIdentityFiles.exists(bundle) {
             let data = try PrivateIdentityFiles.read(bundle)
             current = try decode(data, stage: stage)
-            if let current, current.valid(at: now), !current.needsRenewal(at: now) { return current }
+            if let current, current.valid(at: now), !current.needsRenewal(at: now) {
+                discardLegacyFiles(in: root)
+                return current
+            }
         }
         do {
             let key = stage.appendingPathComponent("private-key.pem")
@@ -59,9 +67,11 @@ struct TLSIdentity {
             guard renewed.valid(at: max(now, Date())) else { throw failure("The renewed TLS certificate is outside its validity period. Check this Mac's clock.") }
             if let current, current.spkiPin != renewed.spkiPin { throw failure("Certificate renewal changed the paired key.") }
             try PrivateIdentityFiles.publish(data, to: bundle, replace: current != nil)
+            discardLegacyFiles(in: root)
             return renewed
         } catch {
             if var current, current.valid(at: now) {
+                discardLegacyFiles(in: root)
                 current.renewalError = "Certificate renewal failed: " + error.localizedDescription
                 return current
             }
@@ -99,6 +109,17 @@ struct TLSIdentity {
         return TLSIdentity(identity: identity, fingerprint: digest(der), spkiPin: digest(try PrivateIdentityFiles.read(spki)),
                            notBefore: Date(timeIntervalSinceReferenceDate: before.doubleValue),
                            expiresAt: Date(timeIntervalSinceReferenceDate: after.doubleValue))
+    }
+
+    private static func discardStaging(in root: URL) {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        for name in names where name.hasPrefix(".tls-") || name.hasPrefix(".identity-") {
+            try? FileManager.default.removeItem(at: root.appendingPathComponent(name))
+        }
+    }
+
+    private static func discardLegacyFiles(in root: URL) {
+        for name in ["private-key.pem", "certificate.pem"] { unlink(root.appendingPathComponent(name).path) }
     }
 
     private static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }

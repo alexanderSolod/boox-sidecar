@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 @main struct SecurityIntegrationTests {
     struct CurlResult {
@@ -210,12 +211,65 @@ import Darwin
         expect(restarted.status == 200 && restarted.output.contains(hostID), "USB-only restart must preserve pinned identity")
     }
 
+    @discardableResult static func openssl(_ arguments: [String]) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        expect(process.terminationStatus == 0, "openssl \(arguments[0]) failed")
+        return data
+    }
+
+    static func checkLegacyCleanup(_ root: URL) throws {
+        let tlsRoot = root.appendingPathComponent("LegacyTLS", isDirectory: true)
+        try PrivateIdentityFiles.prepare(tlsRoot)
+        let legacyKey = tlsRoot.appendingPathComponent("private-key.pem")
+        let legacyCertificate = tlsRoot.appendingPathComponent("certificate.pem")
+        try openssl(["genrsa", "-out", legacyKey.path, "2048"])
+        try Data("legacy".utf8).write(to: legacyCertificate)
+        let spki = try openssl(["pkey", "-in", legacyKey.path, "-pubout", "-outform", "DER"])
+        let legacyPin = SHA256.hash(data: spki).map { String(format: "%02x", $0) }.joined()
+        let stale = tlsRoot.appendingPathComponent(".tls-interrupted", isDirectory: true)
+        try PrivateIdentityFiles.prepare(stale)
+        try FileManager.default.copyItem(at: legacyKey, to: stale.appendingPathComponent("private-key.pem"))
+        try Data("partial".utf8).write(to: tlsRoot.appendingPathComponent(".identity-interrupted"))
+
+        let migrated = try TLSIdentity.load(directory: tlsRoot)
+        expect(migrated.spkiPin == legacyPin, "Legacy key must be migrated into the identity bundle")
+        expect(try FileManager.default.contentsOfDirectory(atPath: tlsRoot.path) == ["identity.p12"], "Legacy and interrupted key material must be removed")
+
+        try Data("legacy".utf8).write(to: legacyKey)
+        try Data("legacy".utf8).write(to: legacyCertificate)
+        let reloaded = try TLSIdentity.load(directory: tlsRoot)
+        expect(reloaded.spkiPin == legacyPin, "Existing bundle must take precedence over legacy files")
+        expect(try FileManager.default.contentsOfDirectory(atPath: tlsRoot.path) == ["identity.p12"], "Legacy files beside a saved bundle must be removed")
+    }
+
+    static func checkConcurrentLoads(_ root: URL, identity: TLSIdentity) {
+        let tlsRoot = root.appendingPathComponent("TLS", isDirectory: true)
+        let lock = NSLock()
+        var pins: [String] = []
+        DispatchQueue.concurrentPerform(iterations: 6) { _ in
+            let pin = (try? TLSIdentity.load(directory: tlsRoot))?.spkiPin ?? ""
+            lock.lock(); pins.append(pin); lock.unlock()
+        }
+        expect(pins.count == 6 && pins.allSatisfy { $0 == identity.spkiPin }, "Concurrent loads must not disrupt each other")
+        expect(try! FileManager.default.contentsOfDirectory(atPath: tlsRoot.path) == ["identity.p12"], "Concurrent loads must clean up staging")
+    }
+
     static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("boox-security-tests-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let (hostID, identity) = try checkIdentity(root)
+        try checkLegacyCleanup(root)
+        checkConcurrentLoads(root, identity: identity)
         checkAuthority()
         try checkSockets(root, hostID: hostID, identity: identity)
-        print("PASS: private identity persistence, TLS time boundaries and renewal, authority invalidation, pinned HTTP/TLS sockets and cancellation")
+        print("PASS: private identity persistence, TLS time boundaries, renewal and legacy key cleanup, authority invalidation, pinned HTTP/TLS sockets and cancellation")
     }
 }
