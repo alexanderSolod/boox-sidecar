@@ -10,7 +10,7 @@ USB uses pinned TLS at `https://127.0.0.1:8787` over ADB reverse. Wi-Fi uses a s
 
 The Mac persists an independent random installation ID and a 32-byte bearer credential (`pairing-token-v2`) under `~/Library/Application Support/BOOX Sidecar/`. Directory permissions are 0700; private files are 0600. The v2 credential replaces the old credential for authentication. Normal restarts retain pairing; **Forget pairing** stops sharing and rotates the token without changing the installation ID or key. A full identity reset requires trusted re-pairing. Demo and development-browser modes never read or write native pairing state.
 
-A dedicated Android `.ProvisioningActivity` requires `android.permission.DUMP`. The public launcher ignores pairing extras. The restricted component validates a complete payload before committing saved state:
+A dedicated Android `.ProvisioningReceiver` requires `android.permission.DUMP`. The public launcher ignores pairing extras. The restricted receiver validates a complete payload before committing saved state and returns result code `-1` only when the pairing is saved; the Mac then opens the launcher activity:
 
 - `pairing_version`: integer 2.
 - `host_id`: independent lowercase 64-hex installation ID, not an authentication secret.

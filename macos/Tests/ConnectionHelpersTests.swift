@@ -43,6 +43,10 @@ import Darwin
         expect(!DevicePairing.hasReverse("UsbFfs tcp:8787 tcp:9999\n", port: 8787), "Incorrect reverse destination must be repaired")
         expect(DevicePairing.outputIndicatesFailure("Starting: Intent\nError type 3\nError: Activity class does not exist."), "adb exit-zero activity failures must be detected")
         expect(!DevicePairing.outputIndicatesFailure("Starting: Intent { cmp=local.boox.sidecar/.MainActivity }\nWarning: Activity not started, intent has been delivered to currently running top-most instance."), "Delivery to an existing activity is success")
+        expect(DevicePairing.broadcastAccepted("Broadcasting: Intent { flg=0x20 cmp=local.boox.sidecar/.ProvisioningReceiver (has extras) }\nBroadcast completed: result=-1\n"), "Accepted pairing must be detected")
+        expect(!DevicePairing.broadcastAccepted("Broadcasting: Intent { flg=0x20 cmp=local.boox.sidecar/.ProvisioningReceiver (has extras) }\nBroadcast completed: result=0, data=\"Update both apps and pair over USB again.\"\n"), "Rejected pairing must be detected")
+        expect(!DevicePairing.broadcastAccepted("Broadcasting: Intent { flg=0x20 cmp=local.boox.sidecar/.ProvisioningReceiver (has extras) }\nBroadcast completed: result=0\n"), "A missing receiver must not count as pairing")
+        expect(!DevicePairing.broadcastAccepted("Broadcast completed: result=-10"), "Only the exact accepted result counts")
         print("PASS: credential persistence, permissions, rotation, malformed/symlink refusal, USB parsing, tunnel reuse and adb error detection")
     }
 }
