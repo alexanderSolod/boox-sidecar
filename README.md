@@ -44,6 +44,8 @@ Mac: macOS 14+ and Swift Command Line Tools. Encrypted Wi-Fi requires macOS 15+ 
 open 'dist/BOOX Sidecar.app'
 ```
 
+The build signs with a persistent self-signed `BOOX Sidecar Dev` identity (created automatically in the login keychain on first use), so Screen Recording and Accessibility grants survive rebuilds instead of resetting each time. `BOOX_SIGNING=adhoc ./scripts/build-mac.sh` restores ad-hoc signing. See [docs/INSTALL.md](docs/INSTALL.md) for the one-time grant and first-signing prompt.
+
 For automatic setup on launch:
 
 ```sh

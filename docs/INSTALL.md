@@ -22,7 +22,7 @@ open "BOOX Sidecar.app"
 ```
 
 On first launch macOS asks for **Screen Recording** — approve it. If capture later reports
-`The user declined TCCs`, the grant went stale (common after ad-hoc rebuilds):
+`The user declined TCCs`, the grant went stale:
 
 ```sh
 tccutil reset ScreenCapture local.boox.sidecar   # clears the stale entry
@@ -31,6 +31,12 @@ tccutil reset ScreenCapture local.boox.sidecar   # clears the stale entry
 Then quit the app, re-add the exact `.app` under
 System Settings → Privacy & Security → Screen & System Audio Recording, and reopen it.
 This step cannot be fully automated — it is a user consent gate.
+
+Release assets are ad-hoc signed, so the grant must be re-approved after replacing the
+app with a *differently signed* copy. Builds from `scripts/build-mac.sh` instead use a
+persistent self-signed `BOOX Sidecar Dev` identity (`scripts/create-signing-identity.sh`,
+auto-created on first build); grants then survive rebuilds. The first build may show one
+keychain "Always allow" prompt.
 
 ## 2. Android receiver (BOOX)
 

@@ -36,6 +36,20 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSScreenCaptureUsageDescription</key><string>Share the display you choose with your BOOX over USB or encrypted Wi-Fi.</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP"
+# A persistent self-signed identity keeps the code requirement stable across
+# rebuilds, so Screen Recording / Accessibility grants survive. Ad-hoc signing
+# resets them every build. Opt out with BOOX_SIGNING=adhoc.
+if [[ "${BOOX_SIGNING:-self}" == adhoc ]]; then
+  codesign --force --sign - "$APP"
+else
+  IDENTITY="${BOOX_SIGN_IDENTITY:-BOOX Sidecar Dev}"
+  if security find-identity 2>/dev/null | grep -qF "\"$IDENTITY\"" \
+     || "$ROOT/scripts/create-signing-identity.sh" >/dev/null; then
+    codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
+  else
+    echo "warning: no signing identity; using ad-hoc (TCC grants reset each rebuild)" >&2
+    codesign --force --sign - "$APP"
+  fi
+fi
 codesign --verify --deep --strict "$APP"
 echo "Built: $APP"
