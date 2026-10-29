@@ -115,7 +115,8 @@ import Darwin
         expect(first.needsRenewal(at: first.expiresAt.addingTimeInterval(1 - TLSIdentity.renewalWindow)), "Certificate inside renewal window must renew")
         let reload = try TLSIdentity.load(directory: tlsRoot)
         expect(reload.fingerprint == first.fingerprint && reload.spkiPin == first.spkiPin, "Ordinary restart must retain certificate and key")
-        expectFailure("Future identity must fail closed") { _ = try TLSIdentity.load(directory: tlsRoot, now: first.notBefore.addingTimeInterval(-1)) }
+        let reissued = try TLSIdentity.load(directory: tlsRoot, now: first.notBefore.addingTimeInterval(-1))
+        expect(reissued.spkiPin == first.spkiPin && reissued.renewalError == nil, "Not-yet-valid certificate must be reissued with the paired key")
         let renewed = try TLSIdentity.load(directory: tlsRoot, now: first.expiresAt.addingTimeInterval(-24 * 60 * 60))
         expect(renewed.spkiPin == first.spkiPin, "Renewal must retain the paired public key")
         expect(renewed.fingerprint != first.fingerprint && renewed.renewalError == nil, "Renewal must publish a fresh certificate")

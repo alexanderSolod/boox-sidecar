@@ -30,7 +30,6 @@ struct TLSIdentity {
             let data = try PrivateIdentityFiles.read(bundle)
             current = try decode(data, stage: stage)
             if let current, current.valid(at: now), !current.needsRenewal(at: now) { return current }
-            if let current, now < current.notBefore { throw failure("The local TLS certificate is not valid yet. Check this Mac's clock.") }
         }
         do {
             let key = stage.appendingPathComponent("private-key.pem")
