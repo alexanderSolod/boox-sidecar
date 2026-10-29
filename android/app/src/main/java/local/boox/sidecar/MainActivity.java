@@ -632,6 +632,7 @@ public final class MainActivity extends Activity {
         resumed = true;
         startNetworkMonitoring();
         acquireWakeLocks();
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         startSession();
     }
 
@@ -663,11 +664,8 @@ public final class MainActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     private void updateScreenLock() {
-        boolean keepScreenOn = resumed && !sessions.hostAsleep();
-        if (keepScreenOn) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (powerManager == null) return;
-        if (keepScreenOn) {
+        if (resumed && !sessions.hostAsleep()) {
             if (screenLock == null || !screenLock.isHeld()) {
                 releaseScreenLock();
                 screenLock = powerManager.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
