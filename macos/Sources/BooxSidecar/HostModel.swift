@@ -38,6 +38,9 @@ struct DisplayInfo: Identifiable {
     @Published var connectionRequested = false
     @Published var connectionMessage = "Open the BOOX app, then click Connect. First-time pairing needs USB."
     @Published var wirelessStarting = false
+    @Published var displayAsleep = false
+    private var sleepWasSharing = false
+    private var workspaceObservers: [NSObjectProtocol] = []
     private let credentialStore: PairingCredentialStore?
     private let advertiser = BonjourAdvertiser()
     private var connectionTask: Task<Void, Never>?
@@ -100,6 +103,51 @@ struct DisplayInfo: Identifiable {
         if !token.isEmpty, args.contains("--extended"), !demo {
             Task { await createExtendedDisplay(requestPermission: false) }
         }
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.displayDidSleep() }
+        })
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.displayDidWake() }
+        })
+        // System sleep wakes through a different notification than display sleep.
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.displayDidWake() }
+        })
+    }
+
+    deinit { workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) } }
+
+    private func displayDidSleep() {
+        displayAsleep = true
+        sleepWasSharing = connectionRequested || capturing || starting
+        if capturing || starting {
+            stop()
+            message = "Display asleep. Sharing pauses until the display wakes."
+        }
+    }
+
+    private func displayDidWake() {
+        displayAsleep = false
+        refreshDisplays()
+        let virtualAlive = virtualDisplayID != 0 && displays.contains(where: { $0.id == virtualDisplayID })
+        if connectionRequested {
+            if virtualAlive {
+                displayID = virtualDisplayID
+                // A ScreenCaptureKit stream can silently die across sleep;
+                // always rebuild it rather than trusting a stale flag.
+                if capturing || starting { stop() }
+                start()
+            } else {
+                virtualDisplayID = 0
+                if demo { start() }
+                else { Task { await createExtendedDisplay(requestPermission: false) } }
+            }
+        } else if sleepWasSharing {
+            if capturing || starting { stop() }
+            start()
+        }
+        sleepWasSharing = false
     }
 
     func refreshDisplays() {
@@ -456,7 +504,7 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 1, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "fingerprint": fingerprint, "host_id": hostID, "message": message]
+        ["protocol": 1, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "fingerprint": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {

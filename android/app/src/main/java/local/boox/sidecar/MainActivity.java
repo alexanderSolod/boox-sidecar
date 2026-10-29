@@ -79,6 +79,7 @@ public final class MainActivity extends Activity {
     private boolean updatingControls;
     private volatile PinnedClient client;
     private volatile boolean captureReady;
+    private volatile boolean hostAsleep;
     private boolean remoteInputRequested;
     private boolean fullscreen = true;
     private long lastFrameID = -1;
@@ -499,12 +500,14 @@ public final class MainActivity extends Activity {
                 if (!isCurrent(session)) return;
                 validateHost(pairing, result);
                 adoptHostSettings(session, result);
-                setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing"));
+                hostAsleep = result.optBoolean("displayAsleep", false);
+                setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing") && !hostAsleep);
                 if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
                 hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
+                        : hostAsleep ? "Mac display asleep — resumes on wake"
                         : !result.optBoolean("capturing") ? "Start capture on your Mac."
                         : result.optBoolean("demo") ? "Demo frames" : "Connected";
-                nextStatusAt = started + 2000;
+                nextStatusAt = started + (hostAsleep ? 5000 : 2000);
                 double measured = receivedFrames * 1000.0 / Math.max(1, started - measurementStart);
                 postStatus(session, (USB.equals(endpoint) ? "USB" : "Wi-Fi") + " · " + hostStatus + " · " + fps + " FPS requested · "
                         + String.format(java.util.Locale.ROOT, "%.1f", measured) + " FPS received · "
@@ -544,7 +547,7 @@ public final class MainActivity extends Activity {
                     }
                 }
             }
-            delay = captureReady ? Math.max(1, 1000 / fps - (SystemClock.elapsedRealtime() - started)) : 500;
+            delay = captureReady ? Math.max(1, 1000 / fps - (SystemClock.elapsedRealtime() - started)) : (hostAsleep ? 3000 : 500);
         } catch (Exception exception) {
             if (!isCurrent(session)) return;
             setCaptureState(session, false);
@@ -579,7 +582,9 @@ public final class MainActivity extends Activity {
         }
         ui.post(() -> {
             if (!isCurrent(session)) return;
-            if (!captureReady) frameView.clearFrame();
+            // While the Mac display sleeps, freeze the last frame instead of
+            // clearing to white; the panel keeps it with zero refreshes.
+            if (!captureReady && !hostAsleep) frameView.clearFrame();
             updateFrameInput();
         });
     }
