@@ -1,5 +1,6 @@
 #import "VirtualDisplayKit.h"
 #import <objc/runtime.h>
+#import <stdatomic.h>
 
 // Private API signatures independently narrowed from these public references:
 // DeskPad CGVirtualDisplayPrivate.h (MIT, Bastian Andelefski; Khaos Tian header):
@@ -29,9 +30,40 @@
 - (BOOL)applySettings:(CGVirtualDisplaySettings *)settings;
 @end
 
+@interface BXVirtualDisplayController ()
+- (void)configurationChanged;
+@end
+
+static void DisplayConfigurationChanged(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context) {
+    if (!(flags & kCGDisplayBeginConfigurationFlag)) {
+        [(__bridge BXVirtualDisplayController *)context configurationChanged];
+    }
+}
+
 @implementation BXVirtualDisplayController {
     CGVirtualDisplay *_display;
     NSString *_lastError;
+    BOOL _observingConfiguration;
+    _Atomic(NSUInteger) _displayGeneration;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _observingConfiguration = CGDisplayRegisterReconfigurationCallback(DisplayConfigurationChanged, (__bridge void *)self) == kCGErrorSuccess;
+    return self;
+}
+
+- (void)dealloc {
+    if (_observingConfiguration) CGDisplayRemoveReconfigurationCallback(DisplayConfigurationChanged, (__bridge void *)self);
+}
+
+- (void)configurationChanged {
+    NSUInteger generation = atomic_load_explicit(&_displayGeneration, memory_order_relaxed);
+    __weak BXVirtualDisplayController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BXVirtualDisplayController *controller = weakSelf;
+        if (controller && generation == atomic_load_explicit(&controller->_displayGeneration, memory_order_relaxed) && controller.onConfigurationChanged) controller.onConfigurationChanged();
+    });
 }
 
 - (BOOL)available {
@@ -58,6 +90,8 @@
     NSAssert([NSThread isMainThread], @"Create displays on the main thread");
     if (_display) return _display.displayID;
     _lastError = nil;
+    if (!_observingConfiguration) { _lastError = @"Could not observe display configuration changes."; return 0; }
+    atomic_fetch_add_explicit(&_displayGeneration, 1, memory_order_relaxed);
     if (!self.available) { _lastError = @"This macOS release does not expose the required virtual display APIs."; return 0; }
     @autoreleasepool {
     @try {
@@ -99,7 +133,7 @@
     }
 }
 
-- (BOOL)arrangeExtendedDisplayOnSide:(BXDisplaySide)side {
+- (BOOL)arrangeExtendedDisplayAtOrigin:(CGPoint)origin {
     NSAssert([NSThread isMainThread], @"Arrange displays on the main thread");
     _lastError = nil;
     CGDirectDisplayID displayID = self.displayID;
@@ -124,10 +158,7 @@
         }
         if (result == kCGErrorSuccess) {
             step = @"set desktop position";
-            CGRect mainBounds = CGDisplayBounds(CGMainDisplayID());
-            CGFloat x = CGRectGetMaxX(mainBounds);
-            if (side == BXDisplaySideLeft) x = CGRectGetMinX(mainBounds) - CGDisplayBounds(displayID).size.width;
-            result = CGConfigureDisplayOrigin(config, displayID, (int32_t)x, (int32_t)CGRectGetMinY(mainBounds));
+            result = CGConfigureDisplayOrigin(config, displayID, (int32_t)origin.x, (int32_t)origin.y);
         }
         if (result == kCGErrorSuccess) {
             step = @"commit session arrangement";
@@ -147,6 +178,7 @@
 
 - (void)removeDisplay {
     NSAssert([NSThread isMainThread], @"Remove displays on the main thread");
+    atomic_fetch_add_explicit(&_displayGeneration, 1, memory_order_relaxed);
     _display = nil;
 }
 @end

@@ -34,7 +34,7 @@ struct HostView: View {
                         Text("Your Mac desktop, extended onto your BOOX").foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Text(host.demo ? "DEMO" : host.capturing ? "SHARING" : "READY").font(.caption.bold()).padding(8).background(.quaternary, in: Capsule())
+                    Text(host.developmentBrowser ? "DEVELOPMENT HTTP" : host.demo ? "DEMO" : host.capturing ? "SHARING" : "READY").font(.caption.bold()).padding(8).background(.quaternary, in: Capsule())
                 }
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
@@ -63,8 +63,8 @@ struct HostView: View {
                             Picker("BOOX desktop", selection: Binding(get: { host.displayPosition }, set: { host.setPosition($0) })) {
                                 Text("◀ Left").tag("left")
                                 Text("Right ▶").tag("right")
-                            }.pickerStyle(.segmented).labelsHidden().frame(width: 170)
-                            Text("of your main display").font(.caption).foregroundStyle(.secondary)
+                            }.pickerStyle(.segmented).labelsHidden().frame(width: 170).disabled(host.creatingExtendedDisplay)
+                            Text("of your displays").font(.caption).foregroundStyle(.secondary)
                             Spacer()
                         }
                         Text("\(host.maxWidth) px · \(host.fps) capture FPS · \(host.grayscale ? "Grayscale" : "Color") · JPEG \(Int(host.jpegQuality * 100))%")
@@ -77,7 +77,7 @@ struct HostView: View {
                 DisclosureGroup("Advanced controls", isExpanded: $advanced) {
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {
-                            Picker("Display", selection: Binding(get: { host.displayID }, set: { host.displayID = $0; host.applySettings() })) {
+                            Picker("Display", selection: Binding(get: { host.displayID }, set: { host.selectDisplay($0) })) {
                                 ForEach(host.displays) { display in Text("\(display.name) · \(display.width) × \(display.height)").tag(display.id) }
                             }
                             Button { host.refreshDisplays() } label: { Image(systemName: "arrow.clockwise") }
@@ -94,27 +94,27 @@ struct HostView: View {
                         }
                         HStack {
                             Button("Start capture") { host.start() }.disabled(host.capturing || host.starting || !host.serverReady)
-                            Button("Stop capture") { host.stop() }.disabled(!host.capturing && !host.starting)
+                            Button("Stop capture") { host.stop() }.disabled(!host.capturing && !host.starting && !host.displayAsleep)
                             Button("Create BOOX display") { Task { await host.createExtendedDisplay() } }.disabled(host.creatingExtendedDisplay || host.demo || !host.virtualDisplay.available)
                             Button("Remove display") { host.removeExtendedDisplay() }.disabled(host.virtualDisplayID == 0 || host.creatingExtendedDisplay)
                         }
                         Text("The separate desktop uses experimental private macOS display APIs. You can also select an existing display above.").font(.caption).foregroundStyle(.secondary)
-                        Toggle("Enable encrypted Wi-Fi (port 8788)", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.enableWireless($0) }))
+                        Toggle("Enable encrypted Wi-Fi (port \(host.wifiPort))", isOn: Binding(get: { host.wirelessEnabled || host.wirelessStarting }, set: { host.setWirelessPreference($0) })).disabled(host.browserEnabled)
                         if !host.wirelessMessage.isEmpty { Text(host.wirelessMessage).font(.caption).textSelection(.enabled) }
                         HStack {
-                            Button("Pair app for USB") { host.pairBOOX(useWiFi: false) }.disabled(host.pairingDevice)
-                            Button("Pair app for Wi-Fi") { host.pairBOOX(useWiFi: true) }.disabled(host.pairingDevice || !host.wirelessEnabled)
-                            Button("Copy certificate fingerprint") { host.copyFingerprint() }.disabled(host.fingerprint.isEmpty)
+                            Button("Pair app for USB") { host.pairBOOX(useWiFi: false) }.disabled(host.pairingDevice || host.browserEnabled)
+                            Button("Pair app for Wi-Fi") { host.pairBOOX(useWiFi: true) }.disabled(host.pairingDevice || host.browserEnabled || !host.wirelessEnabled)
+                            Button("Copy public-key pin") { host.copyFingerprint() }.disabled(host.fingerprint.isEmpty)
                         }
-                        if let address = host.wirelessAddresses.first { Text("Wi-Fi address: \(address):8788").font(.caption).textSelection(.enabled) }
+                        if let address = host.wirelessAddresses.first { Text("Wi-Fi address: \(address):\(host.wifiPort)").font(.caption).textSelection(.enabled) }
                         HStack {
-                            Button("Copy browser link") { host.copyLink() }
+                            if host.browserEnabled { Button("Copy browser link") { host.copyLink() } }
                             Button("Copy pairing token") { host.copyToken() }
                             Spacer()
                             Button("Forget pairing…", role: .destructive) { confirmForget = true }
                         }
                         Text("Manual USB: adb reverse tcp:\(String(host.port)) tcp:\(String(host.port))").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        if host.lan { Text("Legacy --lan exposes unencrypted HTTP. Prefer encrypted Wi-Fi.").font(.caption).foregroundStyle(.orange) }
+
                     }.padding(.top, 12)
                 }
             }.padding(24)
@@ -123,6 +123,5 @@ struct HostView: View {
             Button("Forget pairing", role: .destructive) { host.forgetPairing() }
             Button("Cancel", role: .cancel) { }
         } message: { Text("This stops sharing and replaces the saved credential. Previously paired devices must be paired again over USB.") }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in host.refreshDisplays() }
     }
 }

@@ -18,7 +18,7 @@
     <form id="pairForm"><label for="token">Session token</label><input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste token from your Mac" required><div class="actions"><button type="submit" id="connect">Connect</button><button type="button" id="disconnect" disabled>Disconnect</button></div></form>
   </section>
   <section id="settingsPanel" class="panel settings" aria-label="View settings" hidden>
-    <label>Display<select id="display" disabled><option value="">Waiting for Mac</option></select></label>
+    <label>Display<output id="display">Waiting for Mac</output><span class="hint">Choose the shared display in the Mac app.</span></label>
     <label>Requested frames per second<select id="fps"><option value="1">1 · reading</option><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="12">12</option><option value="15">15</option><option value="24">24</option><option value="30">30</option><option value="45">45</option><option value="60" selected>60 · maximum</option></select></label>
     <label>Image width<select id="maxWidth"><option value="900">900 px · lighter</option><option value="1240" selected>1240 px · balanced</option><option value="1860">1860 px · detailed</option><option value="2480">2480 px · maximum</option></select></label>
     <label class="check"><input type="checkbox" id="grayscale">Grayscale</label>

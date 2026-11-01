@@ -1,6 +1,8 @@
-# Install and launch — release builds
+# Install and launch — v0.3.0 release
 
-Copy-pasteable steps for users and coding agents. Release assets:
+These steps describe the v0.3.0 release assets using protocol 1. Current source builds use protocol 2, require macOS 15+, and require updating both apps and pairing again over USB. The plaintext status command below applies only to the older release. See [README.md](../README.md) for current-source behavior.
+
+Release assets:
 
 | Asset | Contents |
 | --- | --- |
@@ -66,7 +68,7 @@ unfreeze **BOOX Sidecar** in BOOX app management.
 
 First-time pairing needs USB attached; afterwards Wi-Fi alone is enough.
 
-## Verify it works (agent checklist)
+## Verify the v0.3.0 release
 
 ```sh
 TOKEN=$(cat "$HOME/Library/Application Support/BOOX Sidecar/pairing-token")
@@ -92,7 +94,7 @@ adb reverse --remove tcp:8787
 ## Build from source instead
 
 ```sh
-./scripts/build-mac.sh                        # needs macOS 14+ and Swift Command Line Tools
+./scripts/build-mac.sh                        # needs macOS 15+ and Swift Command Line Tools
 python3 scripts/bootstrap-android.py          # project-local JDK17/Gradle/SDK, checksum-verified
 sh android/build.sh && ./scripts/install-native.sh
 ```

@@ -2,7 +2,6 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 import VirtualDisplayKit
-import CryptoKit
 
 struct DisplayInfo: Identifiable {
     let id: CGDirectDisplayID
@@ -33,34 +32,46 @@ struct DisplayInfo: Identifiable {
     @Published var fingerprint = ""
     @Published var wirelessMessage = ""
     let virtualDisplay = BXVirtualDisplayController()
-    @Published private(set) var token: String
+    private var virtualPlacement = VirtualDisplayPlacement()
+    @Published private(set) var token: String = ""
     @Published var connecting = false
     @Published var connectionRequested = false
     @Published var connectionMessage = "Open the BOOX app, then click Connect. First-time pairing needs USB."
     @Published var wirelessStarting = false
     @Published var displayAsleep = false
     @Published var displayPosition = "right"
-    private var sleepWasSharing = false
+    private struct ResumeTarget {
+        let displayID: CGDirectDisplayID
+        let extended: Bool
+        let connected: Bool
+    }
+    private var resumeTarget: ResumeTarget?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let credentialStore: PairingCredentialStore?
     private let advertiser = BonjourAdvertiser()
     private var connectionTask: Task<Void, Never>?
+    private var manualPairingTask: Task<Void, Never>?
     private var usbWatcher: Task<Void, Never>?
-    private var seenUSBDevices = Set<String>()
+    private var usbProvisioning = USBProvisioningState()
+    private var connectionGeneration = 0
     private var wirelessGeneration = 0
-    var hostID: String {
-        if !fingerprint.isEmpty { return fingerprint.lowercased().replacingOccurrences(of: ":", with: "") }
-        // USB remains usable when TLS cannot load (including macOS 14). The
-        // random credential has 256 bits of entropy; its hash reveals no secret.
-        return SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
-    }
+    private(set) var hostID = ""
+    private var tlsIdentity: TLSIdentity?
+    private var tlsDirectory: URL?
+    private var tlsMaintenanceTimer: Timer?
+    private var configurationError: String?
+    let wifiPort: UInt16
     let port: UInt16
-    let lan: Bool
+    let developmentBrowser: Bool
+    var browserEnabled: Bool { demo || developmentBrowser }
     let demo: Bool
     private let server = HTTPServer()
     private let wirelessServer = HTTPServer()
     private var capture: ScreenCapture?
+    private var captureDisplayID: CGDirectDisplayID?
     private var generation = 0
+    private let sharingAuthority = SharingAuthority()
+    private var captureSession = ""
     private var frame: CapturedFrame?
     private var demoTimer: Timer?
     var viewerURL: String { "http://127.0.0.1:\(port)/#token=\(token)" }
@@ -68,20 +79,48 @@ struct DisplayInfo: Identifiable {
     init() {
         let args = CommandLine.arguments
         demo = args.contains("--demo")
-        lan = args.contains("--lan")
+        developmentBrowser = args.contains("--development-browser")
         if let index = args.firstIndex(of: "--port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { port = value } else { port = 8787 }
-        if demo { credentialStore = nil }
+        if let index = args.firstIndex(of: "--wifi-port"), args.indices.contains(index + 1), let value = UInt16(args[index + 1]), value > 0 { wifiPort = value } else { wifiPort = 8788 }
+        if demo || developmentBrowser { credentialStore = nil }
         else {
             let directory: URL
             if let index = args.firstIndex(of: "--pairing-directory"), args.indices.contains(index + 1) { directory = URL(fileURLWithPath: args[index + 1], isDirectory: true) }
             else { directory = PairingCredentialStore.applicationDirectory }
             credentialStore = PairingCredentialStore(directory: directory)
         }
+        for option in ["--port", "--wifi-port"] {
+            let positions = args.indices.filter { args[$0] == option }
+            if positions.count > 1 { configurationError = "Specify \(option) only once." }
+            if let index = positions.first,
+               !args.indices.contains(index + 1) || UInt16(args[index + 1]).map({ $0 > 0 }) != true {
+                configurationError = "\(option) requires a port from 1 through 65535."
+            }
+        }
+        if !browserEnabled && port == wifiPort { configurationError = "USB and Wi-Fi require different listener ports." }
+        if args.contains("--lan") || (browserEnabled && args.contains("--wireless")) {
+            configurationError = "--lan is unsupported. Development browser mode is loopback-only and cannot enable Wi-Fi."
+        }
         var credentialFailure: String?
-        do { token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken() }
+        token = ""
+        do {
+            if let configurationError { throw NSError(domain: "BOOXSidecar.Configuration", code: 1, userInfo: [NSLocalizedDescriptionKey: configurationError]) }
+            token = try credentialStore?.loadOrCreate() ?? PairingCredentialStore.randomToken()
+            hostID = try credentialStore.map { try HostIdentityStore(directory: $0.directory).loadOrCreate() } ?? PairingCredentialStore.randomToken()
+            if !browserEnabled {
+                if let index = args.firstIndex(of: "--tls-directory"), args.indices.contains(index + 1) {
+                    tlsDirectory = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                } else { tlsDirectory = credentialStore?.directory.appendingPathComponent("TLS", isDirectory: true) }
+                let tls = try TLSIdentity.load(directory: tlsDirectory)
+                tlsIdentity = tls
+                fingerprint = tls.spkiPin
+                if let warning = tls.renewalError { wirelessMessage = warning }
+            }
+        }
         catch { token = ""; credentialFailure = error.localizedDescription }
-        if !demo {
+        if !browserEnabled {
             let prefs = UserDefaults.standard
+            virtualPlacement = VirtualDisplayPlacement(data: prefs.data(forKey: "virtualDisplay.placement"))
             if let value = prefs.object(forKey: "capture.fps") as? Int, (1...60).contains(value) { fps = value }
             if let value = prefs.object(forKey: "capture.width") as? Int, (600...2480).contains(value) { maxWidth = value }
             if prefs.object(forKey: "capture.grayscale") != nil { grayscale = prefs.bool(forKey: "capture.grayscale") }
@@ -89,6 +128,9 @@ struct DisplayInfo: Identifiable {
             if let value = prefs.string(forKey: "display.position"), ["left", "right"].contains(value) { displayPosition = value }
         }
         refreshDisplays()
+        virtualDisplay.onConfigurationChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.refreshDisplays() }
+        }
         if let credentialFailure { message = credentialFailure; connectionMessage = credentialFailure }
         server.handler = { [weak self] request, reply in
             Task { @MainActor in reply(self?.handle(request) ?? .error("Host unavailable", status: 503)) }
@@ -96,60 +138,67 @@ struct DisplayInfo: Identifiable {
         server.onReady = { [weak self] in Task { @MainActor in self?.serverReady = true } }
         server.onError = { [weak self] text in Task { @MainActor in self?.message = "Server: \(text)"; self?.serverReady = false } }
         do {
-            if !token.isEmpty { try server.start(port: port, lan: lan) }
+            if !token.isEmpty { try startLocalServer() }
             // CLI output is intentionally a local pairing credential; never transmitted to a third party.
             if demo { print("BOOX Sidecar DEMO viewer: \(viewerURL)"); fflush(stdout) }
         } catch { message = "Unable to start server: \(error.localizedDescription)" }
+        if !browserEnabled, tlsIdentity != nil { scheduleTLSMaintenance() }
         if demo { startDemo() }
-        if !token.isEmpty, args.contains("--wireless") { enableWireless(true) }
+        if developmentBrowser {
+            connectionMessage = "Development browser: loopback HTTP with a disposable credential. Native pairing and Wi-Fi are disabled."
+            print("BOOX Sidecar DEVELOPMENT viewer: \(viewerURL)"); fflush(stdout)
+        }
+        if !browserEnabled, !token.isEmpty, args.contains("--wireless") { enableWireless(true) }
         if !token.isEmpty, args.contains("--extended"), !demo {
             Task { await createExtendedDisplay(requestPermission: false) }
         }
         let center = NSWorkspace.shared.notificationCenter
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidSleep() }
-        })
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidWake() }
-        })
-        // System sleep wakes through a different notification than display sleep.
-        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displayDidWake() }
-        })
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.displayDidSleep() }
+            })
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.displayDidWake() }
+            })
+        }
     }
 
     deinit { workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) } }
 
     private func displayDidSleep() {
+        guard !displayAsleep else { return }
         displayAsleep = true
-        sleepWasSharing = connectionRequested || capturing || starting
-        if capturing || starting {
-            stop()
-            message = "Display asleep. Sharing pauses until the display wakes."
+        if resumeTarget == nil, capturing || starting || connecting || creatingExtendedDisplay {
+            let selected = captureDisplayID ?? displayID
+            resumeTarget = ResumeTarget(displayID: selected,
+                extended: creatingExtendedDisplay || (connecting && captureDisplayID == nil)
+                    || (virtualDisplayID != 0 && selected == virtualDisplayID),
+                connected: connectionRequested)
         }
+        cancelConnectionWork()
+        stopCapture()
+        message = "Display asleep. Sharing pauses until the display wakes."
+        connectionMessage = message
     }
 
     private func displayDidWake() {
+        guard displayAsleep else { return }
         displayAsleep = false
-        refreshDisplays()
-        let virtualAlive = virtualDisplayID != 0 && displays.contains(where: { $0.id == virtualDisplayID })
-        if connectionRequested {
-            if virtualAlive {
-                displayID = virtualDisplayID
-                // A ScreenCaptureKit stream can silently die across sleep;
-                // always rebuild it rather than trusting a stale flag.
-                if capturing || starting { stop() }
-                start()
-            } else {
-                virtualDisplayID = 0
-                if demo { start() }
-                else { Task { await createExtendedDisplay(requestPermission: false) } }
-            }
-        } else if sleepWasSharing {
-            if capturing || starting { stop() }
-            start()
+        guard refreshTLSIdentity() else {
+            resumeTarget = nil
+            connectionRequested = false
+            connectionMessage = "Sharing could not resume. " + wirelessMessage
+            return
         }
-        sleepWasSharing = false
+        refreshDisplays()
+        guard let target = resumeTarget else {
+            if message == "Display asleep. Sharing pauses until the display wakes." { message = "Sharing stopped." }
+            if connectionMessage == "Display asleep. Sharing pauses until the display wakes." { connectionMessage = "Click Connect to share a display." }
+            return
+        }
+        beginConnection(resuming: target)
     }
 
     func refreshDisplays() {
@@ -167,15 +216,50 @@ struct DisplayInfo: Identifiable {
         // A running ScreenCaptureKit stream is authoritative. Legacy preflight
         // can remain stale after permission changes on recent macOS releases.
         if !capturing && !starting { permission = CGPreflightScreenCaptureAccess() }
+        recordVirtualDisplayPlacement()
+    }
+
+    private var otherDisplayBounds: [CGRect] {
+        displays.filter { $0.id != virtualDisplayID }.map { CGDisplayBounds($0.id) }
+    }
+
+    private func recordVirtualDisplayPlacement() {
+        guard !creatingExtendedDisplay, virtualDisplayID != 0, virtualDisplayID == virtualDisplay.displayID,
+              CGDisplayIsActive(virtualDisplayID) != 0, CGDisplayMirrorsDisplay(virtualDisplayID) == 0 else { return }
+        let bounds = CGDisplayBounds(virtualDisplayID)
+        let previous = virtualPlacement.savedOrigin
+        virtualPlacement.observe(origin: bounds.origin, size: bounds.size, otherDisplays: otherDisplayBounds)
+        if previous != virtualPlacement.savedOrigin { saveVirtualDisplayPlacement() }
+    }
+
+    private func saveVirtualDisplayPlacement() {
+        if !browserEnabled { UserDefaults.standard.set(virtualPlacement.data, forKey: "virtualDisplay.placement") }
+    }
+
+    private func releaseVirtualDisplay() {
+        virtualPlacement.removed()
+        virtualDisplay.removeDisplay()
+        virtualDisplayID = 0
     }
 
     func createExtendedDisplay(requestPermission: Bool = true) async {
-        guard !creatingExtendedDisplay, !demo else { return }
+        guard !creatingExtendedDisplay, !demo, !displayAsleep, !Task.isCancelled else { return }
+        resumeTarget = nil
+        cancelConnectionWork()
+        connectionRequested = false
+        await prepareExtendedDisplay(requestPermission: requestPermission)
+    }
+
+    private func prepareExtendedDisplay(requestPermission: Bool = true) async {
+        guard !creatingExtendedDisplay, !demo, !displayAsleep, !Task.isCancelled else { return }
+        let attempt = connectionGeneration
+        recordVirtualDisplayPlacement()
+        let existing = virtualDisplay.displayID != 0
         creatingExtendedDisplay = true
         defer {
             creatingExtendedDisplay = false
-            if Task.isCancelled {
-                stop(); virtualDisplay.removeDisplay(); virtualDisplayID = 0; refreshDisplays()
+            if Task.isCancelled || connectionGeneration != attempt {
+                stopCapture(); releaseVirtualDisplay(); refreshDisplays()
             }
         }
         let id = virtualDisplay.createExtendedDisplay()
@@ -183,13 +267,13 @@ struct DisplayInfo: Identifiable {
         virtualDisplayID = id
         // WindowServer and ScreenCaptureKit discover new displays asynchronously.
         for _ in 0..<20 {
-            if Task.isCancelled { return }
+            if Task.isCancelled || connectionGeneration != attempt { return }
             refreshDisplays()
             if displays.contains(where: { $0.id == id }) { break }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard displays.contains(where: { $0.id == id }) else {
-            virtualDisplay.removeDisplay(); virtualDisplayID = 0
+            releaseVirtualDisplay()
             message = "The new display did not become available. Try creating it again."
             return
         }
@@ -197,36 +281,111 @@ struct DisplayInfo: Identifiable {
         // finish publishing it before committing its session-only arrangement.
         var arranged = false
         for _ in 0..<20 {
-            if Task.isCancelled { return }
-            if virtualDisplay.arrangeExtendedDisplay(on: displaySide) { arranged = true; break }
+            if Task.isCancelled || connectionGeneration != attempt { return }
+            let bounds = CGDisplayBounds(id)
+            if existing, CGDisplayMirrorsDisplay(id) == 0,
+               VirtualDisplayPlacement.isUsable(origin: bounds.origin, size: bounds.size, otherDisplays: otherDisplayBounds) {
+                arranged = true
+                break
+            }
+            if let origin = virtualPlacement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds, mainDisplay: CGDisplayBounds(CGMainDisplayID()), onLeft: displayPosition == "left"),
+               virtualDisplay.arrangeExtendedDisplay(at: origin) {
+                let actual = CGDisplayBounds(id)
+                if actual.origin == origin, VirtualDisplayPlacement.isUsable(origin: actual.origin, size: actual.size, otherDisplays: otherDisplayBounds) {
+                    arranged = true
+                    break
+                }
+            }
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard arranged else {
             let failure = virtualDisplay.lastError ?? "Could not arrange the extended desktop."
-            virtualDisplay.removeDisplay(); virtualDisplayID = 0
+            releaseVirtualDisplay()
             refreshDisplays()
             message = failure
             return
         }
-        if capturing || starting { stop() }
+        virtualPlacement.arranged(at: CGDisplayBounds(id).origin)
+        saveVirtualDisplayPlacement()
+        if capturing || starting { stopCapture() }
         displayID = id
-        message = "Extended desktop created to the right of your main display. Move windows onto it."
+        message = "Extended desktop ready. Move windows onto it using your display arrangement."
         try? await Task.sleep(nanoseconds: 300_000_000)
-        guard !Task.isCancelled else { return }
-        if requestPermission || CGPreflightScreenCaptureAccess() { start() }
+        guard !Task.isCancelled, connectionGeneration == attempt else { return }
+        if requestPermission || CGPreflightScreenCaptureAccess() { startCapture() }
         else { message = "Extended desktop is ready. Click Start capture to grant Screen Recording permission." }
     }
 
     func removeExtendedDisplay() {
         guard !creatingExtendedDisplay else { return }
-        if displayID == virtualDisplayID { stop() }
-        virtualDisplay.removeDisplay()
-        virtualDisplayID = 0
+        recordVirtualDisplayPlacement()
+        if displayID == virtualDisplayID || resumeTarget?.extended == true { stop() }
+        releaseVirtualDisplay()
         refreshDisplays()
         message = "BOOX extended display removed."
     }
 
+    private func startLocalServer() throws {
+        if let configurationError { throw NSError(domain: "BOOXSidecar.Configuration", code: 1, userInfo: [NSLocalizedDescriptionKey: configurationError]) }
+        if browserEnabled {
+            try server.start(port: port, lan: false)
+        } else {
+            guard let identity = tlsIdentity, identity.valid(at: Date()) else {
+                throw NSError(domain: "BOOXSidecar.TLS", code: 1, userInfo: [NSLocalizedDescriptionKey: "A valid TLS identity is required for native USB."])
+            }
+            try server.start(port: port, lan: false, tlsIdentity: identity.identity)
+        }
+    }
+
+    private func scheduleTLSMaintenance() {
+        tlsMaintenanceTimer?.invalidate()
+        let remaining = tlsIdentity?.expiresAt.timeIntervalSinceNow ?? 60
+        let delay = max(1, min(24 * 60 * 60, remaining))
+        tlsMaintenanceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refreshTLSIdentity() }
+        }
+    }
+
+    @discardableResult private func refreshTLSIdentity() -> Bool {
+        guard configurationError == nil else { return false }
+        if browserEnabled { return true }
+        defer { scheduleTLSMaintenance() }
+        do {
+            let refreshed = try TLSIdentity.load(directory: tlsDirectory)
+            let changed = refreshed.fingerprint != tlsIdentity?.fingerprint
+            let restoreWiFi = wirelessEnabled || wirelessStarting
+            tlsIdentity = refreshed
+            fingerprint = refreshed.spkiPin
+            if changed || !serverReady {
+                server.stop()
+                serverReady = false
+                try startLocalServer()
+                if restoreWiFi { enableWireless(false); enableWireless(true) }
+            }
+            if let warning = refreshed.renewalError { wirelessMessage = warning }
+            return true
+        } catch {
+            wirelessMessage = "TLS renewal failed: " + error.localizedDescription
+            if tlsIdentity?.valid(at: Date()) != true {
+                stop()
+                server.stop()
+                serverReady = false
+                enableWireless(false)
+                tlsIdentity = nil
+                message = "Secure connections stopped because the TLS identity expired. " + error.localizedDescription
+            }
+            return false
+        }
+    }
+
+    func setWirelessPreference(_ enabled: Bool) {
+        guard !browserEnabled, configurationError == nil else { return }
+        UserDefaults.standard.set(enabled, forKey: "wireless.enabled")
+        enableWireless(enabled)
+    }
+
     func enableWireless(_ enabled: Bool) {
+        guard !browserEnabled, configurationError == nil else { return }
         if !enabled {
             wirelessGeneration += 1
             advertiser.stop()
@@ -241,13 +400,9 @@ struct DisplayInfo: Identifiable {
         wirelessGeneration += 1
         let attempt = wirelessGeneration
         do {
-            let args = CommandLine.arguments
-            let directory: URL?
-            if let index = args.firstIndex(of: "--tls-directory"), args.indices.contains(index + 1) {
-                directory = URL(fileURLWithPath: args[index + 1], isDirectory: true)
-            } else { directory = nil }
-            let tls = try TLSIdentity.load(directory: directory)
-            fingerprint = tls.fingerprint
+            guard let tls = tlsIdentity, tls.valid(at: Date()) else {
+                throw NSError(domain: "BOOXSidecar.TLS", code: 1, userInfo: [NSLocalizedDescriptionKey: "The secure host identity is unavailable."])
+            }
             wirelessServer.handler = { [weak self] request, reply in
                 Task { @MainActor in reply(self?.handle(request) ?? .error("Host unavailable", status: 503)) }
             }
@@ -256,7 +411,7 @@ struct DisplayInfo: Identifiable {
                 self.wirelessStarting = false
                 self.wirelessEnabled = true
                 self.advertiser.onError = { [weak self] text in self?.wirelessMessage = text }
-                self.advertiser.start(hostID: self.hostID)
+                self.advertiser.start(hostID: self.hostID, port: self.wifiPort)
                 self.wirelessMessage = "Encrypted Wi-Fi and automatic discovery are ready."
             } }
             wirelessServer.onError = { [weak self] text in Task { @MainActor in
@@ -266,119 +421,202 @@ struct DisplayInfo: Identifiable {
                 self.advertiser.stop()
                 self.wirelessMessage = "Wi-Fi: \(text)"
             } }
-            try wirelessServer.start(port: 8788, lan: true, tlsIdentity: tls.identity)
+            try wirelessServer.start(port: wifiPort, lan: true, tlsIdentity: tls.identity)
             wirelessMessage = "Starting encrypted Wi-Fi…"
         } catch { wirelessStarting = false; wirelessEnabled = false; wirelessMessage = "Wi-Fi unavailable: \(error.localizedDescription)" }
     }
 
     func connect() {
-        guard !connecting, !token.isEmpty else { return }
+        guard !connecting, !token.isEmpty, !displayAsleep else { return }
+        resumeTarget = nil
+        beginConnection()
+    }
+
+    private func beginConnection(resuming target: ResumeTarget? = nil) {
+        guard !token.isEmpty, !displayAsleep else { return }
+        cancelConnectionWork()
+        connectionRequested = target?.connected ?? true
         if demo {
-            connectionRequested = true
             if !capturing { startDemo() }
+            resumeTarget = nil
             connectionMessage = "Synthetic demo is ready. No BOOX pairing or screen capture is performed."
             return
         }
-        connectionRequested = true
+        if developmentBrowser && target == nil {
+            startCapture()
+            return
+        }
         connecting = true
-        connectionMessage = "Preparing your BOOX desktop…"
-        connectionTask?.cancel()
-        connectionTask = Task {
-            defer { connecting = false }
+        let attempt = connectionGeneration
+        connectionMessage = target == nil ? "Preparing your BOOX desktop…" : "Resuming the shared display…"
+        connectionTask = Task { [self] in
+            defer {
+                if connectionGeneration == attempt {
+                    connecting = false
+                    connectionTask = nil
+                    resumeTarget = nil
+                }
+            }
             for _ in 0..<30 {
+                guard connectionIsCurrent(attempt) else { return }
                 if serverReady { break }
-                if Task.isCancelled { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            guard connectionIsCurrent(attempt) else { return }
             guard serverReady else { connectionRequested = false; connectionMessage = "The local server is unavailable. " + message; return }
-            enableWireless(true)
-            if demo { start() } else { await createExtendedDisplay() }
-            for _ in 0..<100 {
-                if !starting || Task.isCancelled { break }
+            while creatingExtendedDisplay {
+                guard connectionIsCurrent(attempt) else { return }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled, connectionRequested else { return }
+            guard connectionIsCurrent(attempt) else { return }
+            guard browserEnabled || tlsIdentity?.valid(at: Date()) == true else {
+                stop()
+                connectionMessage = "Sharing requires a valid TLS identity."
+                return
+            }
+            if connectionRequested, UserDefaults.standard.object(forKey: "wireless.enabled") as? Bool ?? true { enableWireless(true) }
+            if let target {
+                refreshDisplays()
+                if target.extended {
+                    if target.displayID != 0, target.displayID == virtualDisplay.displayID,
+                       displays.contains(where: { $0.id == target.displayID }) {
+                        virtualDisplayID = target.displayID
+                        displayID = target.displayID
+                        startCapture()
+                    } else {
+                        releaseVirtualDisplay()
+                        await prepareExtendedDisplay(requestPermission: false)
+                    }
+                } else {
+                    for _ in 0..<20 {
+                        guard connectionIsCurrent(attempt) else { return }
+                        refreshDisplays()
+                        if displays.contains(where: { $0.id == target.displayID }) { break }
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                    }
+                    guard connectionIsCurrent(attempt) else { return }
+                    refreshDisplays()
+                    guard displays.contains(where: { $0.id == target.displayID }) else {
+                        connectionRequested = false
+                        message = "The shared display is unavailable. Choose a display and start sharing again."
+                        connectionMessage = message
+                        return
+                    }
+                    displayID = target.displayID
+                    startCapture()
+                }
+            } else { await prepareExtendedDisplay() }
+            for _ in 0..<100 {
+                guard connectionIsCurrent(attempt) else { return }
+                if !starting { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard connectionIsCurrent(attempt) else { return }
             if starting {
-                stop(); connectionRequested = false
+                stopCapture(); connectionRequested = false
                 connectionMessage = "macOS is still waiting to start capture. Finish any Screen Recording permission prompt, then click Connect again."
                 return
             }
             guard capturing else { connectionRequested = false; connectionMessage = message; return }
+            guard connectionRequested else { connectionMessage = "Sharing resumed."; return }
             for _ in 0..<100 {
-                if !wirelessStarting || Task.isCancelled { break }
+                guard connectionIsCurrent(attempt) else { return }
+                if !wirelessStarting { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard !Task.isCancelled else { return }
-            await checkUSB(explicit: true)
-            guard !Task.isCancelled, connectionRequested else { return }
-            usbWatcher?.cancel()
+            guard connectionIsCurrent(attempt) else { return }
+            await checkUSB(explicit: target == nil)
+            guard connectionIsCurrent(attempt), connectionRequested else { return }
             usbWatcher = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    guard let self, !Task.isCancelled, self.connectionRequested else { return }
+                    guard let self, self.connectionIsCurrent(attempt), self.connectionRequested else { return }
                     await self.checkUSB(explicit: false)
                 }
             }
+            if target != nil { connectionMessage = "Sharing resumed." }
         }
     }
 
-    func disconnect() {
-        connectionRequested = false
-        connectionTask?.cancel(); connectionTask = nil
-        usbWatcher?.cancel(); usbWatcher = nil
-        seenUSBDevices.removeAll()
+    private func connectionIsCurrent(_ attempt: Int) -> Bool {
+        connectionGeneration == attempt && !displayAsleep && !Task.isCancelled
+    }
+
+    private func cancelConnectionWork() {
+        connectionGeneration += 1
+        connectionTask?.cancel()
+        connectionTask = nil
+        manualPairingTask?.cancel()
+        usbWatcher?.cancel()
+        usbWatcher = nil
         connecting = false
+    }
+
+    func disconnect() {
         stop()
+        usbProvisioning = USBProvisioningState()
         enableWireless(false)
         if !creatingExtendedDisplay { removeExtendedDisplay() }
         connectionMessage = "Disconnected. Pairing is remembered for next time."
     }
 
     private func checkUSB(explicit: Bool) async {
-        guard !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice, connectionRequested, !displayAsleep, !Task.isCancelled else { return }
         pairingDevice = true
         defer { pairingDevice = false }
+        let attempt = connectionGeneration
         let pairPort = port, pairToken = token, pin = fingerprint.isEmpty ? nil : fingerprint, identity = hostID
         let address = wirelessAddresses.first
-        let pairHost = wirelessEnabled && address != nil ? "https://\(address!):8788" : "http://127.0.0.1:\(port)"
-        let oldDevices = seenUSBDevices
+        let pairHost = wirelessEnabled && address != nil ? "https://\(address!):\(wifiPort)" : "https://127.0.0.1:\(port)"
+        let previousState = usbProvisioning
         do {
-            let worker = Task.detached(priority: .utility) { () throws -> (Set<String>, Int, String?) in
+            let worker = Task.detached(priority: .utility) { () throws -> (USBProvisioningState, Int, String?) in
                 let devices = try DevicePairing.discover()
+                var state = previousState
+                state.updateDiscovered(Set(devices.map(\.serial)))
                 var provisioned = 0
                 var pairingError: String?
                 for device in devices {
                     try Task.checkCancellation()
+                    let shouldProvision = state.shouldProvision(device.serial, now: ProcessInfo.processInfo.systemUptime, explicit: explicit)
                     do {
                         try DevicePairing.ensureReverse(device: device, port: pairPort)
-                        if explicit || !oldDevices.contains(device.serial) {
+                        if shouldProvision {
                             try Task.checkCancellation()
                             try DevicePairing.provision(device: device, port: pairPort, host: pairHost, token: pairToken, fingerprint: pin, hostID: identity)
+                            try Task.checkCancellation()
+                            state.succeeded(device.serial)
                             provisioned += 1
                         }
                     } catch is CancellationError { throw CancellationError() }
-                    catch { if explicit || !oldDevices.contains(device.serial) { pairingError = error.localizedDescription } }
+                    catch {
+                        if shouldProvision {
+                            state.failed(device.serial, now: ProcessInfo.processInfo.systemUptime)
+                            pairingError = error.localizedDescription
+                        }
+                    }
                 }
-                return (Set(devices.map(\.serial)), provisioned, pairingError)
+                return (state, provisioned, pairingError)
             }
             let result = try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
-            guard connectionRequested, !Task.isCancelled else { return }
-            seenUSBDevices = result.0
+            guard connectionRequested, connectionGeneration == attempt, !Task.isCancelled else { return }
+            usbProvisioning = result.0
             if let error = result.2 { connectionMessage = "Desktop ready. " + error }
             else if result.1 > 0 { connectionMessage = "BOOX app paired for USB and Wi-Fi. Your desktop is ready; confirm the app displays it." }
             else if explicit { connectionMessage = wirelessEnabled ? "Desktop ready. Open the remembered BOOX app to reconnect over Wi-Fi, or plug in USB to pair." : "Desktop ready for USB. " + wirelessMessage }
         } catch {
-            guard connectionRequested, !Task.isCancelled else { return }
+            guard connectionRequested, connectionGeneration == attempt, !Task.isCancelled else { return }
             if explicit { connectionMessage = (wirelessEnabled ? "Desktop ready for remembered Wi-Fi. " : "") + error.localizedDescription }
         }
     }
 
     func forgetPairing() {
+        guard configurationError == nil else { return }
         disconnect()
         do {
             token = try credentialStore?.rotate() ?? PairingCredentialStore.randomToken()
             if !serverReady {
-                try server.start(port: port, lan: lan)
+                try startLocalServer()
             }
             connectionMessage = "Pairing forgotten. Connect the BOOX by USB and click Connect to pair again."
         } catch { connectionMessage = error.localizedDescription }
@@ -396,24 +634,28 @@ struct DisplayInfo: Identifiable {
 
     var wirelessAddresses: [String] { DevicePairing.addresses }
 
-    var displaySide: BXDisplaySide { displayPosition == "left" ? .left : .right }
-
-    /// Reposition the BOOX desktop relative to the main display. Persists for
-    /// future creation and rearranges the live virtual display without
-    /// restarting capture. Left of main gives the desktop negative X
-    /// coordinates; input mapping already uses the display's own bounds.
     func setPosition(_ side: String) {
-        guard side == "left" || side == "right" else { return }
+        guard (side == "left" || side == "right"), !creatingExtendedDisplay else { return }
+        var placement = VirtualDisplayPlacement()
+        if virtualDisplayID != 0, displays.contains(where: { $0.id == virtualDisplayID }) {
+            let bounds = CGDisplayBounds(virtualDisplayID)
+            guard let origin = placement.preferredOrigin(size: bounds.size, otherDisplays: otherDisplayBounds,
+                    mainDisplay: CGDisplayBounds(CGMainDisplayID()), onLeft: side == "left"),
+                  virtualDisplay.arrangeExtendedDisplay(at: origin) else {
+                message = virtualDisplay.lastError ?? "Could not reposition the BOOX display."
+                return
+            }
+            placement.arranged(at: origin)
+        }
         displayPosition = side
-        if !demo { UserDefaults.standard.set(side, forKey: "display.position") }
-        guard virtualDisplayID != 0, displays.contains(where: { $0.id == virtualDisplayID }) else { return }
-        if !virtualDisplay.arrangeExtendedDisplay(on: displaySide) {
-            message = virtualDisplay.lastError ?? "Could not reposition the BOOX display."
-        } else { message = "BOOX desktop moved to the \(side) of your main display." }
+        virtualPlacement = placement
+        if !browserEnabled { UserDefaults.standard.set(side, forKey: "display.position") }
+        saveVirtualDisplayPlacement()
+        message = "BOOX desktop position set to the \(side)."
     }
 
     func pairBOOX(useWiFi: Bool) {
-        guard !pairingDevice else { return }
+        guard !browserEnabled, !pairingDevice, !displayAsleep else { return }
         let host: String
         let certificate: String?
         if useWiFi {
@@ -421,31 +663,51 @@ struct DisplayInfo: Identifiable {
                 message = "Enable encrypted Wi-Fi and connect the Mac to your network first."
                 return
             }
-            host = "https://\(address):8788"
+            host = "https://\(address):\(wifiPort)"
             certificate = fingerprint
-        } else { host = "http://127.0.0.1:\(port)"; certificate = fingerprint.isEmpty ? nil : fingerprint }
+        } else { host = "https://127.0.0.1:\(port)"; certificate = fingerprint.isEmpty ? nil : fingerprint }
         pairingDevice = true
+        let attempt = connectionGeneration
         let pairPort = port, pairToken = token, pairID = hostID
-        Task {
+        let wifiHost = wirelessAddresses.first.map { "https://\($0):\(wifiPort)" }
+        manualPairingTask = Task {
+            defer {
+                pairingDevice = false
+                manualPairingTask = nil
+            }
             do {
-                try await Task.detached(priority: .userInitiated) {
-                    try DevicePairing.pair(port: pairPort, host: host, token: pairToken, fingerprint: certificate, hostID: pairID, preferUSB: !useWiFi)
-                }.value
+                let worker = Task.detached(priority: .userInitiated) {
+                    try DevicePairing.pair(port: pairPort, host: host, token: pairToken, fingerprint: certificate, hostID: pairID, preferUSB: !useWiFi, wifiHost: wifiHost)
+                }
+                try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
+                guard connectionGeneration == attempt, !Task.isCancelled else { return }
                 message = useWiFi ? "Wi-Fi pairing sent to the BOOX app. Confirm it connects, then unplug USB." : "USB pairing sent to the BOOX app."
-            } catch { message = error.localizedDescription }
-            pairingDevice = false
+            } catch {
+                guard connectionGeneration == attempt, !Task.isCancelled else { return }
+                message = error.localizedDescription
+            }
         }
     }
 
     func copyFingerprint() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(fingerprint, forType: .string) }
 
     func start() {
-        guard !starting, !capturing else { return }
+        guard !starting, !capturing, !creatingExtendedDisplay, !displayAsleep else { return }
+        resumeTarget = nil
+        cancelConnectionWork()
+        connectionRequested = false
+        startCapture()
+    }
+
+    private func startCapture() {
+        guard !starting, !capturing, !displayAsleep else { return }
         if demo { startDemo(); return }
         // An explicit Start request reaches ScreenCaptureKit directly. Its
         // SCShareableContent/SCStream calls enforce consent and can present the
         // system permission prompt; a stale CGPreflight result must not block it.
         generation += 1
+        sharingAuthority.invalidate()
+        captureSession = UUID().uuidString
         let currentGeneration = generation
         let session = ScreenCapture()
         capture = session
@@ -463,9 +725,11 @@ struct DisplayInfo: Identifiable {
                 guard let self, self.generation == currentGeneration else { return }
                 self.stop()
                 self.message = "Capture stopped: \(text)"
+                self.connectionMessage = self.message
             }
         }
         let id = displayID, rate = fps, width = maxWidth, gray = grayscale, quality = jpegQuality
+        captureDisplayID = id
         Task {
             do {
                 try await session.start(displayID: id, fps: rate, maxWidth: width, grayscale: gray, jpegQuality: quality)
@@ -476,22 +740,33 @@ struct DisplayInfo: Identifiable {
                 message = "Sharing the selected display. Keep private content off that display."
             } catch {
                 guard generation == currentGeneration else { return }
-                starting = false
-                capturing = false
-                capture = nil
+                stop()
                 permission = CGPreflightScreenCaptureAccess()
                 let failure = error as NSError
                 message = "ScreenCaptureKit failed (\(failure.domain), \(failure.code)): \(error.localizedDescription)"
+                connectionMessage = message
             }
         }
     }
 
     func stop() {
+        resumeTarget = nil
+        connectionRequested = false
+        cancelConnectionWork()
+        stopCapture()
+    }
+
+    private func stopCapture() {
+        sharingAuthority.invalidate()
+        captureSession = ""
+        server.cancelSensitiveConnections()
+        wirelessServer.cancelSensitiveConnections()
         generation += 1
         demoTimer?.invalidate()
         demoTimer = nil
         let oldCapture = capture
         capture = nil
+        captureDisplayID = nil
         starting = false
         capturing = false
         frame = nil
@@ -499,15 +774,24 @@ struct DisplayInfo: Identifiable {
         Task { await oldCapture?.stop() }
     }
 
+    func selectDisplay(_ id: CGDirectDisplayID) {
+        guard id != displayID else { return }
+        displayID = id
+        if displayAsleep || resumeTarget != nil || creatingExtendedDisplay || (connecting && !capturing) {
+            stop()
+            connectionMessage = "Display selected. Click Start capture when ready."
+        } else { applySettings() }
+    }
+
     func applySettings() {
-        if !demo {
+        if !browserEnabled {
             let prefs = UserDefaults.standard
             prefs.set(fps, forKey: "capture.fps")
             prefs.set(maxWidth, forKey: "capture.width")
             prefs.set(grayscale, forKey: "capture.grayscale")
             prefs.set(jpegQuality, forKey: "capture.jpegQuality")
         }
-        if capturing || starting { stop(); start() }
+        if capturing || starting { stopCapture(); startCapture() }
     }
 
     func enableInput(_ enabled: Bool) {
@@ -522,17 +806,28 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 1, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "fingerprint": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "message": message]
+        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
+        var response = respond(to: request)
+        if request.path.hasPrefix("/api/") {
+            response.authority = sharingAuthority.ticket(expiresAt: browserEnabled ? nil : tlsIdentity?.expiresAt)
+        }
+        return response
+    }
+
+    private func respond(to request: HTTPRequest) -> HTTPResponse {
+        if !browserEnabled && tlsIdentity?.valid(at: Date()) != true {
+            return .error("TLS identity expired; renew it on the Mac", status: 503)
+        }
         // Prevent DNS rebinding in default loopback mode.
-        if !lan && !request.secure {
+        if request.loopback {
             let allowed = ["127.0.0.1:\(port)", "localhost:\(port)"]
             guard let host = request.headers["host"], allowed.contains(host.lowercased()) else { return .error("Invalid Host", status: 403) }
         }
         if request.path.hasPrefix("/api/") {
-            guard request.headers["authorization"] == "Bearer \(token)" else { return .error("Pairing token required", status: 401) }
+            guard SharingAuthority.matchesCredential(header: request.headers["authorization"], token: token) else { return .error("Pairing token required", status: 401) }
         }
         if request.method != "GET" {
             if let origin = request.headers["origin"] {
@@ -545,18 +840,23 @@ struct DisplayInfo: Identifiable {
         let postPaths = ["/api/settings", "/api/input"]
         if getPaths.contains(request.path) && request.method != "GET" || postPaths.contains(request.path) && request.method != "POST" { return .error("Method not allowed", status: 405) }
         switch request.path {
-        case "/health": return .json(["ok": true, "protocol": 1])
+        case "/health": return .json(["ok": true, "protocol": 2])
         case "/api/status": return .json(status())
         case "/api/displays": return .json(["displays": displays.map(\.json)])
         case "/api/frame":
+            if capturing && !demo && captureDisplayID.map({ CGDisplayIsActive($0) != 0 }) != true {
+                stop()
+                return HTTPResponse(status: 204)
+            }
             guard let after = Int(request.query["after"] ?? "-1"), after >= -1 else { return .error("Invalid frame ID", status: 400) }
-            guard let frame, frameID > after else { return HTTPResponse(status: 204) }
-            return HTTPResponse(type: "image/jpeg", headers: ["X-Frame-ID": String(frameID), "X-Frame-Width": String(frame.width), "X-Frame-Height": String(frame.height)], body: frame.jpeg)
+            guard capturing, !captureSession.isEmpty, let frame, frameID > after else { return HTTPResponse(status: 204) }
+            return HTTPResponse(type: "image/jpeg", headers: ["X-Capture-Session": captureSession, "X-Frame-ID": String(frameID), "X-Frame-Width": String(frame.width), "X-Frame-Height": String(frame.height)], body: frame.jpeg)
         case "/api/settings", "/api/input":
             guard request.headers["content-type"]?.lowercased().hasPrefix("application/json") == true,
                   let object = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else { return .error("Expected JSON object", status: 400) }
             return request.path == "/api/settings" ? settings(object) : input(object)
         case "/", "/index.html", "/app.js", "/style.css":
+            guard browserEnabled else { return .error("Browser access requires --development-browser", status: 404) }
             let filename = request.path == "/" ? "index.html" : String(request.path.dropFirst())
             let root: URL
             if let path = ProcessInfo.processInfo.environment["BOOX_VIEWER_PATH"] { root = URL(fileURLWithPath: path, isDirectory: true) }
@@ -574,8 +874,9 @@ struct DisplayInfo: Identifiable {
     }
 
     private func settings(_ object: [String: Any]) -> HTTPResponse {
-        guard Set(object.keys).isSubset(of: ["fps", "grayscale", "maxWidth", "displayID", "jpegQuality"]) else { return .error("Unknown setting", status: 400) }
-        var newFPS = fps, newWidth = maxWidth, newGray = grayscale, newID = displayID
+        guard object["displayID"] == nil else { return .error("Select the shared display locally on the Mac", status: 403) }
+        guard Set(object.keys).isSubset(of: ["fps", "grayscale", "maxWidth", "jpegQuality"]) else { return .error("Unknown setting", status: 400) }
+        var newFPS = fps, newWidth = maxWidth, newGray = grayscale
         var newQuality = jpegQuality
         if let raw = object["fps"] {
             guard let value = number(raw), (1...60).contains(value), value.rounded() == value else { return .error("fps must be an integer from 1 to 60", status: 400) }
@@ -593,30 +894,28 @@ struct DisplayInfo: Identifiable {
             guard let value = raw as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return .error("grayscale must be boolean", status: 400) }
             newGray = value.boolValue
         }
-        if let raw = object["displayID"] {
-            guard let value = number(raw), value >= 0, value <= Double(UInt32.max), value.rounded() == value,
-                  displays.contains(where: { $0.id == UInt32(value) }) else { return .error("Unknown display", status: 400) }
-            newID = UInt32(value)
-        }
-        let changed = jpegQuality != newQuality || fps != newFPS || maxWidth != newWidth || grayscale != newGray || displayID != newID
-        jpegQuality = newQuality; fps = newFPS; maxWidth = newWidth; grayscale = newGray; displayID = newID
+        let changed = jpegQuality != newQuality || fps != newFPS || maxWidth != newWidth || grayscale != newGray
+        jpegQuality = newQuality; fps = newFPS; maxWidth = newWidth; grayscale = newGray
         if changed { applySettings() }
         return .json(status())
     }
 
     private func input(_ object: [String: Any]) -> HTTPResponse {
-        guard inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
+        guard !captureSession.isEmpty, object["capture_session"] as? String == captureSession else {
+            return .error("Input belongs to an inactive capture session", status: 403)
+        }
+        guard let captureDisplayID, CGDisplayIsActive(captureDisplayID) != 0, inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
         guard let type = object["type"] as? String else { return .error("Input type required", status: 400) }
         if type == "tap" {
             guard let x = number(object["x"]), let y = number(object["y"]), (0...1).contains(x), (0...1).contains(y) else { return .error("Coordinates must be from 0 to 1", status: 400) }
-            let bounds = CGDisplayBounds(displayID)
+            let bounds = CGDisplayBounds(captureDisplayID)
             let point = CGPoint(x: bounds.minX + x * max(0, bounds.width - 1), y: bounds.minY + y * max(0, bounds.height - 1))
             CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
             CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
             CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
         } else if type == "scroll" {
             guard let delta = number(object["deltaY"]), (-1000...1000).contains(delta) else { return .error("deltaY must be from -1000 to 1000", status: 400) }
-            let bounds = CGDisplayBounds(displayID)
+            let bounds = CGDisplayBounds(captureDisplayID)
             if let cursor = CGEvent(source: nil)?.location, !bounds.contains(cursor) {
                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: bounds.midX, y: bounds.midY), mouseButton: .left)?.post(tap: .cghidEventTap)
             }
@@ -626,6 +925,8 @@ struct DisplayInfo: Identifiable {
     }
 
     private func startDemo() {
+        sharingAuthority.invalidate()
+        captureSession = UUID().uuidString
         capturing = true
         starting = false
         message = "DEMO: synthetic test image. Your screen is not being captured."

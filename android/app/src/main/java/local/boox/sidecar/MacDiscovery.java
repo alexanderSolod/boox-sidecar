@@ -66,11 +66,11 @@ final class MacDiscovery {
                         if (epoch != generation) return;
                         resolving = false;
                         queued.remove(next.getServiceName());
-                        if (info != null && info.getPort() == 8788 && info.getHost() instanceof Inet4Address) {
+                        if (info != null && info.getPort() > 0 && info.getPort() <= 65535 && info.getHost() instanceof Inet4Address) {
                             byte[] identity = info.getAttributes().get("host_id");
                             String reported = identity == null ? "" : new String(identity, StandardCharsets.UTF_8);
                             if (AutoRoutePolicy.identityMatches(hostId, reported)) {
-                                listener.found("https://" + info.getHost().getHostAddress() + ":8788");
+                                listener.found("https://" + info.getHost().getHostAddress() + ":" + info.getPort());
                             }
                         }
                         resolveNext(epoch);

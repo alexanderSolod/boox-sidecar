@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Read-only JPEG transport benchmark; never stores frames or controls device UI.
 
-Run a separate host with --demo to provide changing synthetic frames. Examples:
-  BOOX_SIDECAR_TOKEN=... python3 scripts/benchmark-stream.py --duration 10
+Native HTTPS examples (the pin is the provisioned public-key/SPKI SHA-256):
+  BOOX_SIDECAR_TOKEN=... python3 scripts/benchmark-stream.py --pin SPKI_SHA256 --allow-live
   BOOX_SIDECAR_TOKEN=... python3 scripts/benchmark-stream.py \
-      --url https://MAC_IP:8788 --pin CERT_SHA256 --duration 10
-  BOOX_SIDECAR_TOKEN=... python3 scripts/benchmark-stream.py \
-      --url https://MAC_IP:8788 --pin CERT_SHA256 --adb-serial SERIAL --requests 120
+      --url https://MAC_IP:8788 --pin SPKI_SHA256 --allow-live --duration 10
+
+For an explicitly isolated --demo or --development-browser host, use only its
+disposable launch token with --development-browser --url http://127.0.0.1:8787.
+Never supply a native pairing credential to this plaintext development mode.
+Android curl probing (--adb-serial) is available only for development HTTP;
+its TLS options cannot enforce this app's pin and certificate-validity policy.
 
 The default probe runs on this Mac. --adb-serial runs one native curl session on
 an already connected Android device, reusing connections across requests. It
@@ -16,7 +20,6 @@ only counts/timing are printed; image bytes are discarded without disk writes.
 Transport throughput excludes bitmap decoding, Canvas drawing and panel scanout.
 """
 import argparse
-import base64
 import hashlib
 import hmac
 import http.client
@@ -35,14 +38,14 @@ MAX_JPEG = 12 * 1024 * 1024
 MAX_JSON = 64 * 1024
 
 
-def validate_url(value):
+def validate_url(value, development_browser=False):
     uri = urlsplit(value)
     if (uri.scheme not in ('http', 'https') or not uri.hostname or uri.username
             or uri.password or uri.query or uri.fragment or uri.path not in ('', '/')):
         raise ValueError('Use an HTTP(S) host endpoint without a path, credentials or query.')
-    if uri.scheme == 'http' and uri.hostname not in ('127.0.0.1', 'localhost'):
-        raise ValueError('Plain HTTP is restricted to USB/localhost. Use pinned HTTPS for LAN.')
-    if uri.port is None:
+    if uri.scheme == 'http' and (not development_browser or uri.hostname not in ('127.0.0.1', 'localhost')):
+        raise ValueError('HTTP requires --development-browser, a loopback endpoint, and a disposable development token.')
+    if uri.port is None or not 1 <= uri.port <= 65535:
         raise ValueError('Specify the host port (normally USB 8787 or Wi-Fi 8788).')
     return uri
 
@@ -50,21 +53,19 @@ def validate_url(value):
 def normalize_pin(value):
     result = re.sub(r'[:\s]', '', value or '').lower()
     if not re.fullmatch(r'[0-9a-f]{64}', result):
-        raise ValueError('HTTPS requires the exact 64-hex certificate SHA-256 --pin.')
+        raise ValueError('HTTPS requires the 64-hex public-key/SPKI SHA-256 --pin.')
     return result
 
 
 def peer_matches(connection, pin):
     der = connection.sock.getpeercert(binary_form=True)
-    if not hmac.compare_digest(hashlib.sha256(der).hexdigest(), pin):
+    if not hmac.compare_digest(spki_digest(der).hex(), pin):
         connection.close()
-        raise ValueError('Certificate pin mismatch; no authenticated request was sent.')
+        raise ValueError('Public-key pin mismatch; no authenticated request was sent.')
     return der
 
 
 def prepare_tls(uri, pin):
-    # First handshake has no credentials or HTTP request. Authenticate the leaf
-    # by its provisioned fingerprint, then use it as a temporary in-memory CA.
     probe = http.client.HTTPSConnection(uri.hostname, uri.port,
                                        context=ssl._create_unverified_context(), timeout=4)
     try:
@@ -73,7 +74,8 @@ def prepare_tls(uri, pin):
     finally:
         probe.close()
     context = ssl.create_default_context(cadata=ssl.DER_cert_to_PEM_cert(der))
-    context.check_hostname = False  # Exact provisioned leaf pin is the identity.
+    context.check_hostname = False  # The provisioned SPKI authenticates this local peer.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     check = http.client.HTTPSConnection(uri.hostname, uri.port, context=context, timeout=4)
     try:
         check.connect()  # Checks certificate dates and signature before any token.
@@ -84,8 +86,13 @@ def prepare_tls(uri, pin):
 
 
 class Client:
-    def __init__(self, uri, token, pin, context):
-        self.uri, self.token, self.pin, self.context = uri, token, pin, context
+    def __init__(self, uri, token, pin, context, development_browser=False):
+        self.uri = validate_url(uri.geturl(), development_browser)
+        if self.uri.scheme == 'https':
+            pin = normalize_pin(pin)
+            if context is None or context.verify_mode != ssl.CERT_REQUIRED:
+                raise ValueError('Native HTTPS requires a certificate-verifying TLS context.')
+        self.token, self.pin, self.context = token, pin, context
         self.connection = None
 
     def close(self):
@@ -131,26 +138,23 @@ def curl_quote(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r') + '"'
 
 
-def spki_pin(der):
+def spki_digest(der):
     # Only the public certificate enters these subprocesses. No files created.
     pem = subprocess.run(['openssl', 'x509', '-inform', 'DER', '-pubkey', '-noout'],
                          input=der, capture_output=True, check=True).stdout
     spki = subprocess.run(['openssl', 'pkey', '-pubin', '-outform', 'DER'],
                           input=pem, capture_output=True, check=True).stdout
-    return 'sha256//' + base64.b64encode(hashlib.sha256(spki).digest()).decode()
+    return hashlib.sha256(spki).digest()
 
 
-def adb_probe(args, token, der):
+def adb_probe(args, token):
+    if not args.development_browser or validate_url(args.url, True).scheme != 'http':
+        raise ValueError('Android curl probing supports only explicit development-browser HTTP; use the native app for pinned TLS.')
     adb = shutil.which('adb')
     if not adb:
         raise ValueError('adb is not on PATH.')
     lines = ['silent', 'show-error', 'connect-timeout = 3', 'max-time = 4',
              'header = ' + curl_quote('Authorization: Bearer ' + token)]
-    if der:
-        # curl cannot consume an inline custom CA without a remote file. Pin the
-        # derived public key instead; the exact leaf/dates were verified above.
-        # --insecure accepts the self-signed chain, NEVER disables this key pin.
-        lines += ['insecure', 'pinnedpubkey = ' + curl_quote(spki_pin(der))]
     base = '\n'.join(lines) + '\n'
     command = [adb, '-s', args.adb_serial, 'exec-out', '/system/bin/curl', '--config', '-']
     endpoint = args.url.rstrip('/')
@@ -185,7 +189,7 @@ def adb_probe(args, token, der):
 
 
 def check_status(status, allow_live):
-    if status.get('protocol') != 1:
+    if status.get('protocol') != 2:
         raise ValueError('Unsupported host protocol.')
     if not status.get('demo') and not allow_live:
         raise ValueError('Use a synthetic --demo host, or explicitly permit live reads with --allow-live.')
@@ -215,11 +219,12 @@ def summarize(status, samples, elapsed, source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--url', default='http://127.0.0.1:8787')
-    parser.add_argument('--pin', help='Exact Mac certificate SHA-256 fingerprint for HTTPS')
+    parser.add_argument('--url', default='https://127.0.0.1:8787')
+    parser.add_argument('--development-browser', action='store_true', help='Permit loopback HTTP using only a disposable development-mode token')
+    parser.add_argument('--pin', help='Provisioned Mac public-key/SPKI SHA-256 (64 hex characters) for HTTPS')
     parser.add_argument('--token-env', default='BOOX_SIDECAR_TOKEN', help='Environment variable holding the token; never printed')
     parser.add_argument('--duration', type=float, default=10, help='Mac probe duration in seconds (1–120)')
-    parser.add_argument('--adb-serial', help='Probe from an existing authorized device with native curl; no device changes')
+    parser.add_argument('--adb-serial', help='Development HTTP only: probe from an authorized device with native curl; no device changes')
     parser.add_argument('--requests', type=int, default=120, help='Tablet probe sequential requests (1–1000); --duration applies only to Mac')
     parser.add_argument('--allow-live', action='store_true', help='Permit reading active desktop frames; image bytes are never persisted')
     args = parser.parse_args()
@@ -228,14 +233,16 @@ def main():
     token = os.environ.get(args.token_env, '')
     if not re.fullmatch(r'[0-9a-fA-F]{64}', token):
         parser.error('Set ' + args.token_env + ' to the current 64-hex host token.')
-    uri = validate_url(args.url)
+    uri = validate_url(args.url, args.development_browser)
+    if args.adb_serial and uri.scheme == 'https':
+        parser.error('--adb-serial cannot enforce native TLS certificate validity; use the native app, or explicit development-browser HTTP.')
     pin = normalize_pin(args.pin) if uri.scheme == 'https' else None
-    context, der = prepare_tls(uri, pin) if pin else (None, None)
+    context, _ = prepare_tls(uri, pin) if pin else (None, None)
     if args.adb_serial:
-        status, samples, elapsed = adb_probe(args, token, der)
+        status, samples, elapsed = adb_probe(args, token)
         source = 'Android native curl; persistent transfer session; no bitmap decode'
     else:
-        client = Client(uri, token, pin, context)
+        client = Client(uri, token, pin, context, args.development_browser)
         try:
             status = json.loads(client.get('/api/status', capture=True)[3])
             check_status(status, args.allow_live)

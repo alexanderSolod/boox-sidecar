@@ -14,6 +14,10 @@
         android:enableOnBackInvokedCallback="false"
         android:usesCleartextTraffic="false"
         android:supportsRtl="true">
+        <receiver
+            android:name=".ProvisioningReceiver"
+            android:permission="android.permission.DUMP"
+            android:exported="true" />
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTask"

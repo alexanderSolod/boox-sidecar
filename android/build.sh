@@ -18,6 +18,10 @@ fi
 export PATH
 GRADLE_USER_HOME="${GRADLE_USER_HOME:-$project_root/.tools/gradle-cache}"
 export GRADLE_USER_HOME
+if [ -z "${ANDROID_USER_HOME:-}" ] && [ -f "$project_root/.tools/android-user/debug.keystore" ]; then
+    ANDROID_USER_HOME="$project_root/.tools/android-user"
+    export ANDROID_USER_HOME
+fi
 missing=0
 if ! java -version >/dev/null 2>&1; then
     printf '%s\n' 'Missing Java runtime. Configure JDK 17 (JAVA_HOME/PATH) before building.' >&2

@@ -5,7 +5,7 @@ import Darwin
 /// Persistent pairing secret. Normal host launches reuse it; demos never touch it.
 struct PairingCredentialStore {
     let directory: URL
-    var file: URL { directory.appendingPathComponent("pairing-token") }
+    var file: URL { directory.appendingPathComponent("pairing-token-v2") }
 
     static var applicationDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

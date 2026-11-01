@@ -38,16 +38,14 @@ import org.json.JSONObject;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Native JPEG receiver with one network/decode worker and at most one pending UI frame. */
 public final class MainActivity extends Activity {
-    private static final String USB = "http://127.0.0.1:8787";
+    private static final String USB = AutoRoutePolicy.USB;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker = new ScheduledThreadPoolExecutor(1);
-    private final ScheduledThreadPoolExecutor usbProbeWorker = new ScheduledThreadPoolExecutor(1);
-    private final AtomicBoolean usbProbeBusy = new AtomicBoolean();
-    private final AtomicReference<VerifiedRoute> verifiedUsb = new AtomicReference<>();
+    private final SessionRouter router = new SessionRouter(worker);
+    private final SessionCoordinator<PinnedClient> sessions = new SessionCoordinator<>();
     private final AtomicReference<JSONObject> pendingInput = new AtomicReference<>();
     private final AtomicReference<JSONObject> pendingSettings = new AtomicReference<>();
     private final AtomicReference<PendingFrame> pendingFrame = new AtomicReference<>();
@@ -59,18 +57,13 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button toggle;
     private Button refreshButton;
-    private volatile int generation;
     private volatile boolean resumed;
     private volatile int fps = 60;
     private volatile boolean color = true;
     private volatile int maxWidth = 1240;
     private volatile double jpegQuality = 0.70;
-    private volatile PinnedClient selectingClient;
-    private volatile PinnedClient usbProbeClient;
     private volatile String routeEndpoint = "";
     private volatile String discoveredEndpoint = "";
-    private volatile long nextUsbProbeAt;
-    private int retryAttempt;
     private long lastConnectRequest;
     private MacDiscovery discovery;
     private ConnectivityManager connectivity;
@@ -82,8 +75,6 @@ public final class MainActivity extends Activity {
     private CheckBox colorControl;
     private boolean updatingControls;
     private volatile PinnedClient client;
-    private volatile boolean captureReady;
-    private volatile boolean hostAsleep;
     private boolean remoteInputRequested;
     private boolean fullscreen = true;
     private long lastFrameID = -1;
@@ -106,7 +97,6 @@ public final class MainActivity extends Activity {
         connectivity = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         powerManager = (PowerManager) getSystemService(POWER_SERVICE);
         maxWidth = Math.max(600, Math.min(2480, maxWidth));
-        acceptProvisioning(getIntent());
         buildUi();
         setFullscreen(true);
         Log.i("BooxSidecar", "Native receiver ready; full-refresh API " + (refresh.available() ? "available" : "unavailable"));
@@ -115,41 +105,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        setIntent(intent);
-        acceptProvisioning(intent);
+        setIntent(new Intent());
+        discoveredEndpoint = "";
         if (resumed) startSession();
     }
 
-    private void acceptProvisioning(Intent intent) {
-        if (intent == null || !intent.hasExtra("host")) return;
-        try {
-            String endpoint = PinnedClient.validateEndpoint(intent.getStringExtra("host"));
-            String token = intent.getStringExtra("token");
-            String pin = PinnedClient.normalizePin(intent.getStringExtra("cert_sha256"));
-            String hostId = PinnedClient.normalizePin(intent.getStringExtra("host_id"));
-            if (hostId.isEmpty()) hostId = pin;
-            if (!hostId.matches("[0-9a-f]{64}") || (endpoint.startsWith("https:") && !hostId.equals(pin)))
-                throw new Exception("Provision the Mac's matching host identity and certificate pin.");
-            new PinnedClient(endpoint, token, pin);
-            SharedPreferences.Editor editor = preferences.edit();
-            if (!hostId.equals(savedHostId())) {
-                editor.remove("wifiHost").remove("wifiPin");
-                discoveredEndpoint = "";
-            }
-            editor.putString("token", token).putString("hostId", hostId).putString("usbHost", USB)
-                    .putString("connectionMode", "auto");
-            if (endpoint.startsWith("https:")) editor.putString("wifiHost", endpoint).putString("wifiPin", pin);
-            editor.apply();
-            intent.removeExtra("token");
-            intent.removeExtra("cert_sha256");
-            Log.i("BooxSidecar", "Pairing updated; automatic USB / pinned Wi-Fi enabled");
-        } catch (Exception exception) {
-            Toast.makeText(this, "Pairing rejected: " + exception.getMessage(), Toast.LENGTH_LONG).show();
-        }
-    }
-
     private String savedHostId() {
-        return preferences.getString("hostId", preferences.getString("wifiPin", ""));
+        return preferences.getString("hostId", "");
     }
 
     private void buildUi() {
@@ -236,7 +198,7 @@ public final class MainActivity extends Activity {
                     discovery.stop();
                     discoveredEndpoint = "";
                     preferences.edit().remove("token").remove("wifiPin").remove("wifiHost").remove("usbHost")
-                            .remove("hostId").remove("wifi").remove("connectionMode").apply();
+                            .remove("hostId").remove("wifi").remove("connectionMode").remove("pairingVersion").remove("spkiPin").apply();
                     frameView.clearFrame();
                     status.setText("Saved pairing removed. Connect once by USB and press Connect on your Mac.");
                 }).show()));
@@ -259,14 +221,14 @@ public final class MainActivity extends Activity {
         fields.setOrientation(LinearLayout.VERTICAL);
         fields.setPadding(dp(20), dp(8), dp(20), dp(8));
         CheckBox wifi = new CheckBox(this);
-        wifi.setText("Use Wi-Fi (HTTPS certificate pin required)");
+        wifi.setText("Include Wi-Fi route");
         wifi.setChecked(!preferences.getString("wifiHost", "").isEmpty());
         fields.addView(wifi);
-        EditText host = field(fields, "Mac URL", preferences.getString("wifiHost", USB), false);
+        EditText host = field(fields, "Wi-Fi Mac URL", preferences.getString("wifiHost", "https://192.168.1.100:8788"), false);
+        EditText usb = field(fields, "USB HTTPS URL", preferences.getString("usbHost", USB), false);
         EditText token = field(fields, "Mac session token (64 hex characters)", preferences.getString("token", ""), true);
-        EditText pin = field(fields, "Mac certificate SHA-256 / host identity", savedHostId(), false);
-        wifi.setOnCheckedChangeListener((button, checked) -> host.setText(checked
-                ? preferences.getString("wifiHost", "https://192.168.1.100:8788") : USB));
+        EditText pin = field(fields, "Mac public-key SHA-256 pin", preferences.getString("spkiPin", ""), false);
+        EditText identity = field(fields, "Mac installation identity", savedHostId(), false);
         TextView instructions = new TextView(this);
         instructions.setText("Usually you only need to connect USB once and press Connect on your Mac.\n"
                 + "Auto prefers authenticated USB, then the saved Mac over pinned Wi-Fi.\n"
@@ -279,22 +241,25 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("Cancel", null).setPositiveButton("Connect", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             try {
-                String endpoint = PinnedClient.validateEndpoint(host.getText().toString());
-                if (wifi.isChecked() != endpoint.startsWith("https:")) throw new Exception("Match the URL to your selected USB or Wi-Fi mode.");
-                String secret = token.getText().toString().trim();
-                String fingerprint = PinnedClient.normalizePin(pin.getText().toString());
-                new PinnedClient(endpoint, secret, fingerprint);
-                if (!fingerprint.matches("[0-9a-f]{64}")) throw new Exception("Enter the saved Mac's certificate fingerprint / host identity.");
-                SharedPreferences.Editor editor = preferences.edit();
-                if (!fingerprint.equals(savedHostId())) {
-                    editor.remove("wifiHost").remove("wifiPin");
-                    discoveredEndpoint = "";
-                }
-                editor.putString("token", secret).putString("hostId", fingerprint).putString("connectionMode", "auto").putString("usbHost", USB);
-                if (wifi.isChecked()) editor.putString("wifiHost", endpoint).putString("wifiPin", fingerprint);
-                editor.apply();
-                dialog.dismiss();
-                startSession();
+                String usbEndpoint = usb.getText().toString().trim();
+                String wifiEndpoint = wifi.isChecked() ? host.getText().toString().trim() : "";
+                PairingStore.Record record = PairingStore.validate(usbEndpoint, usbEndpoint, wifiEndpoint,
+                        token.getText().toString().trim(), pin.getText().toString(), identity.getText().toString(),
+                        preferences.getString("connectionMode", "auto"));
+                new AlertDialog.Builder(this).setTitle("Replace saved pairing?")
+                        .setMessage("Trust these Mac pairing details and replace the saved connection?")
+                        .setNegativeButton("Cancel", null)
+                        .setPositiveButton("Replace", (confirmation, which) -> {
+                            try {
+                                PairingStore.save(preferences, record, false);
+                                stopSession();
+                                discoveredEndpoint = "";
+                                dialog.dismiss();
+                                startSession();
+                            } catch (Exception exception) {
+                                host.setError("Could not save pairing. Try again.");
+                            }
+                        }).show();
             } catch (Exception exception) { host.setError(exception.getMessage()); }
         }));
         dialog.show();
@@ -331,141 +296,72 @@ public final class MainActivity extends Activity {
         if (!resumed) return;
         lastConnectRequest = SystemClock.elapsedRealtime();
         frameView.clearFrame();
-        final int session = generation;
+        final int session = sessions.begin();
         try {
-            Pairing pairing = new Pairing(preferences.getString("token", ""), preferences.getString("wifiPin", ""),
-                    savedHostId(), preferences.getString("wifiHost", ""), preferences.getString("connectionMode", "auto"));
-            new PinnedClient(USB, pairing.token, pairing.pin);
-            if (!pairing.hostId.matches("[0-9a-f]{64}")) throw new Exception("Connect USB once and press Connect on your Mac to save its identity.");
-            if (!pairing.wifi.isEmpty() && !pairing.pin.equals(pairing.hostId)) throw new Exception("The saved Wi-Fi pin and Mac identity disagree. Pair over USB again.");
-            retryAttempt = 0;
-            nextUsbProbeAt = 0;
+            SessionRouter.Pairing pairing = new SessionRouter.Pairing(PairingStore.load(preferences));
             status.setText("Connecting to your saved Mac…");
             startDiscovery();
-            worker.execute(() -> selectRoute(session, pairing));
+            router.start(session, pairing, new SessionRouter.Listener() {
+                @Override public boolean current(int candidate) { return isCurrent(candidate); }
+                @Override public String discoveredEndpoint() { return discoveredEndpoint; }
+                @Override public void selected(SessionRouter.Route route) { activateRoute(session, pairing, route); }
+                @Override public void retrying(String message) { postStatus(session, null, message, true); }
+            });
         } catch (Exception exception) {
             status.setText(exception.getMessage());
             controls.setVisibility(View.VISIBLE);
         }
     }
 
-    private void selectRoute(int session, Pairing pairing) {
-        if (!isCurrent(session)) return;
-        String failure = "Mac unavailable. Keep the Mac app open and press Connect there.";
-        for (String endpoint : AutoRoutePolicy.candidates(pairing.mode, pairing.wifi, discoveredEndpoint)) {
-            if (!isCurrent(session)) return;
-            PinnedClient candidate = null;
-            try {
-                candidate = new PinnedClient(endpoint, pairing.token, pairing.pin);
-                selectingClient = candidate;
-                if (USB.equals(endpoint)) candidate.setTimeouts(200, 500);
-                JSONObject authenticated = candidate.json("/api/status", null);
-                validateHost(pairing, authenticated);
-                if (!isCurrent(session)) { candidate.cancel(); return; }
-                candidate.setTimeouts(2500, 3500);
-                activateRoute(session, pairing, new VerifiedRoute(session, candidate, endpoint, authenticated));
-                return;
-            } catch (Exception exception) {
-                if (candidate != null) candidate.cancel();
-                failure = connectionError(exception);
-            } finally { selectingClient = null; }
-        }
-        if (!isCurrent(session)) return;
-        long delay = AutoRoutePolicy.retryDelay(retryAttempt++);
-        postStatus(session, "Reconnecting · " + failure + "\nUSB and saved Wi-Fi retry automatically.", true);
-        worker.schedule(() -> selectRoute(session, pairing), delay, TimeUnit.MILLISECONDS);
-    }
-
-    private void validateHost(Pairing pairing, JSONObject status) throws Exception {
-        if (status.optInt("protocol", -1) != 1) throw new Exception("Unsupported Mac protocol.");
-        if (!AutoRoutePolicy.identityMatches(pairing.hostId, status.optString("host_id", "")))
-            throw new Exception("Mac identity mismatch. No connection was accepted.");
-    }
-
-    private void activateRoute(int session, Pairing pairing, VerifiedRoute route) {
-        if (!isCurrent(session)) { route.client.cancel(); return; }
+    private synchronized void activateRoute(int session, SessionRouter.Pairing pairing, SessionRouter.Route route) {
+        if (!isCurrent(session) || !sessions.activate(session, route.client)) { route.client.cancel(); return; }
         PinnedClient old = client;
         client = route.client;
         routeEndpoint = route.endpoint;
         if (old != null && old != client) old.cancel();
-        captureReady = false;
         lastFrameID = -1;
         nextStatusAt = 0;
         measurementStart = SystemClock.elapsedRealtime();
         receivedFrames = 0;
-        retryAttempt = 0;
-        nextUsbProbeAt = measurementStart + 10000;
+        router.activated(session);
+        pendingInput.set(null);
         PendingFrame discard = pendingFrame.getAndSet(null);
         if (discard != null) discard.bitmap.recycle();
-        if (route.endpoint.startsWith("https:")) preferences.edit().putString("wifiHost", route.endpoint).apply();
-        Log.i("BooxSidecar", "Authenticated route connected: " + (USB.equals(route.endpoint) ? "USB" : "pinned Wi-Fi"));
-        ui.post(() -> {
-            if (!isCurrent(session) || client != route.client) return;
-            frameView.clearFrame();
-            updateFrameInput();
-        });
-        adoptHostSettings(session, route.status);
+        if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
+        Log.i("BooxSidecar", "Authenticated route connected: " + (pairing.usb.equals(route.endpoint) ? "USB" : "pinned Wi-Fi"));
+        setCaptureState(session, route.client, route.status.optBoolean("permission") && route.status.optBoolean("capturing"),
+                route.status.optString("capture_session", ""), route.status.optBoolean("displayAsleep", false));
+        adoptHostSettings(session, route.client, route.status);
         worker.execute(() -> poll(session, pairing, route.client, route.endpoint));
-    }
-
-    private void maybeProbeUsb(int session, Pairing pairing, String endpoint) {
-        long now = SystemClock.elapsedRealtime();
-        if (!AutoRoutePolicy.shouldProbeUsb(pairing.mode, endpoint, now, nextUsbProbeAt) || !usbProbeBusy.compareAndSet(false, true)) return;
-        nextUsbProbeAt = now + 10000;
-        usbProbeWorker.execute(() -> {
-            PinnedClient probe = null;
-            boolean accepted = false;
-            try {
-                if (!isCurrent(session)) return;
-                probe = new PinnedClient(USB, pairing.token, pairing.pin);
-                usbProbeClient = probe;
-                probe.setTimeouts(200, 300);
-                JSONObject authenticated = probe.json("/api/status", null);
-                validateHost(pairing, authenticated);
-                if (!isCurrent(session)) return;
-                probe.setTimeouts(2500, 3500);
-                VerifiedRoute replaced = verifiedUsb.getAndSet(new VerifiedRoute(session, probe, USB, authenticated));
-                if (replaced != null) replaced.client.cancel();
-                accepted = true;
-            } catch (Exception ignored) {
-                // An unavailable USB tunnel must not interrupt an otherwise working Wi-Fi stream.
-            } finally {
-                if (!accepted && probe != null) probe.cancel();
-                usbProbeClient = null;
-                usbProbeBusy.set(false);
-            }
-        });
-    }
-
-    private String connectionError(Exception exception) {
-        return exception instanceof javax.net.ssl.SSLException
-                ? "Wi-Fi certificate verification failed. Re-pair over USB if the Mac identity changed."
-                : exception.getMessage() == null ? "Mac unavailable" : exception.getMessage();
     }
 
     private void startDiscovery() {
         if (!resumed) return;
+        if (preferences.getInt("pairingVersion", 0) != 2 || "usb".equals(preferences.getString("connectionMode", "auto"))) {
+            discovery.stop();
+            return;
+        }
         String expectedId = savedHostId();
         discovery.start(expectedId, endpoint -> {
             if (!resumed || !expectedId.equals(savedHostId())) return;
             boolean changed = !endpoint.equals(discoveredEndpoint);
             discoveredEndpoint = endpoint;
-            if (changed && client == null && SystemClock.elapsedRealtime() - lastConnectRequest > 1000) startSession();
+            if (changed && client == null && !sessions.hostAsleep() && SystemClock.elapsedRealtime() - lastConnectRequest > 1000) startSession();
         });
     }
 
-    private void stopSession() {
-        generation++;
-        captureReady = false;
-        if (frameView != null) updateFrameInput();
+    private synchronized void stopSession() {
+        sessions.stop();
+        updateScreenLock();
+        router.stop();
+        if (frameView != null) {
+            frameView.clearFrame();
+            updateFrameInput();
+        }
         PinnedClient previous = client;
         client = null;
         routeEndpoint = "";
         if (previous != null) previous.cancel();
-        if (selectingClient != null) selectingClient.cancel();
-        if (usbProbeClient != null) usbProbeClient.cancel();
-        VerifiedRoute candidate = verifiedUsb.getAndSet(null);
-        if (candidate != null) candidate.client.cancel();
         pendingInput.set(null);
         pendingSettings.set(null);
         PendingFrame previousFrame = pendingFrame.getAndSet(null);
@@ -473,17 +369,17 @@ public final class MainActivity extends Activity {
         worker.getQueue().clear();
     }
 
-    private void poll(int session, Pairing pairing, PinnedClient connection, String endpoint) {
-        if (!isCurrent(session) || client != connection) return;
-        VerifiedRoute upgrade = verifiedUsb.getAndSet(null);
+    private void poll(int session, SessionRouter.Pairing pairing, PinnedClient connection, String endpoint) {
+        if (!isCurrent(session) || !sessions.owns(session, connection)) return;
+        SessionRouter.Route upgrade = router.takeUsbUpgrade();
         if (upgrade != null) {
-            if (upgrade.session == session && "auto".equals(pairing.mode)) {
+            if (upgrade.session == session && "auto".equals(pairing.mode) && !sessions.hostAsleep()) {
                 activateRoute(session, pairing, upgrade);
                 return;
             }
             upgrade.client.cancel();
         }
-        maybeProbeUsb(session, pairing, endpoint);
+        if (!sessions.hostAsleep()) router.maybeProbeUsb(session, endpoint);
         long started = SystemClock.elapsedRealtime();
         long delay = Math.max(1, 1000 / fps);
         try {
@@ -491,44 +387,51 @@ public final class MainActivity extends Activity {
             if (settings != null) {
                 try { connection.json("/api/settings", settings); }
                 catch (Exception exception) {
-                    pendingSettings.compareAndSet(null, settings);
+                    if (isCurrent(session) && sessions.owns(session, connection)) pendingSettings.compareAndSet(null, settings);
                     throw exception;
                 }
             }
+            if (!isCurrent(session) || !sessions.owns(session, connection)) return;
             JSONObject input = pendingInput.getAndSet(null);
-            if (input != null && captureReady) {
+            if (input != null && sessions.captureReady() && sessions.acceptsCapture(input.optString("capture_session", ""))) {
                 try { connection.json("/api/input", input); }
-                catch (Exception exception) { postStatus(session, exception.getMessage(), true); }
+                catch (Exception exception) { postStatus(session, connection, exception.getMessage(), true); }
             }
             if (started >= nextStatusAt) {
                 JSONObject result = connection.json("/api/status", null);
-                if (!isCurrent(session)) return;
-                validateHost(pairing, result);
-                adoptHostSettings(session, result);
-                boolean wasAsleep = hostAsleep;
-                hostAsleep = result.optBoolean("displayAsleep", false);
-                if (wasAsleep != hostAsleep) ui.post(this::updateScreenLock);
-                setCaptureState(session, result.optBoolean("permission") && result.optBoolean("capturing") && !hostAsleep);
-                if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
-                hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
-                        : hostAsleep ? "Mac display asleep — resumes on wake"
-                        : !result.optBoolean("capturing") ? "Start capture on your Mac."
-                        : result.optBoolean("demo") ? "Demo frames" : "Connected";
-                nextStatusAt = started + (hostAsleep ? 5000 : 2000);
-                double measured = receivedFrames * 1000.0 / Math.max(1, started - measurementStart);
-                postStatus(session, (USB.equals(endpoint) ? "USB" : "Wi-Fi") + " · " + hostStatus + " · " + fps + " FPS requested · "
-                        + String.format(java.util.Locale.ROOT, "%.1f", measured) + " FPS received · "
-                        + (color ? "color" : "grayscale") + " · " + maxWidth + " px", !captureReady);
-                if (started - measurementStart >= 5000) {
-                    Log.i("BooxSidecar", "Stream stats: " + String.format(java.util.Locale.ROOT, "%.1f", measured)
-                            + " FPS received, " + fps + " requested, session=" + session);
-                    measurementStart = started;
-                    receivedFrames = 0;
+                synchronized (this) {
+                    if (!isCurrent(session) || !sessions.owns(session, connection)) return;
+                    SessionRouter.validateHost(pairing, result);
+                    adoptHostSettings(session, connection, result);
+                    setCaptureState(session, connection, result.optBoolean("permission") && result.optBoolean("capturing"),
+                            result.optString("capture_session", ""), result.optBoolean("displayAsleep", false));
+                    if (result.optLong("frameID", 0) < lastFrameID) lastFrameID = -1;
+                    hostStatus = !result.optBoolean("permission") ? "Grant Screen Recording on your Mac."
+                            : sessions.hostAsleep() ? "Mac display asleep — resumes on wake"
+                            : !result.optBoolean("capturing") ? "Start capture on your Mac."
+                            : result.optBoolean("demo") ? "Demo frames" : "Connected";
+                    nextStatusAt = started + (sessions.hostAsleep() ? 5000 : 2000);
+                    double measured = receivedFrames * 1000.0 / Math.max(1, started - measurementStart);
+                    postStatus(session, connection, (pairing.usb.equals(endpoint) ? "USB" : "Wi-Fi") + " · " + hostStatus + " · " + fps + " FPS requested · "
+                            + String.format(java.util.Locale.ROOT, "%.1f", measured) + " FPS received · "
+                            + (color ? "color" : "grayscale") + " · " + maxWidth + " px", !sessions.captureReady());
+                    if (started - measurementStart >= 5000) {
+                        Log.i("BooxSidecar", "Stream stats: " + String.format(java.util.Locale.ROOT, "%.1f", measured)
+                                + " FPS received, " + fps + " requested, session=" + session);
+                        measurementStart = started;
+                        receivedFrames = 0;
+                    }
                 }
             }
-            PinnedClient.Response response = captureReady ? connection.frame(lastFrameID)
+            PinnedClient.Response response = sessions.captureReady() ? connection.frame(lastFrameID)
                     : new PinnedClient.Response(new byte[0], -1);
             if (response.bytes.length != 0 && isCurrent(session)) {
+                if (!sessions.acceptsCapture(response.captureSession)) {
+                    setCaptureState(session, connection, false, "", sessions.hostAsleep());
+                    nextStatusAt = 0;
+                    if (isCurrent(session) && sessions.owns(session, connection)) worker.schedule(() -> poll(session, pairing, connection, endpoint), 1, TimeUnit.MILLISECONDS);
+                    return;
+                }
                 BitmapFactory.Options bounds = new BitmapFactory.Options();
                 bounds.inJustDecodeBounds = true;
                 BitmapFactory.decodeByteArray(response.bytes, 0, response.bytes.length, bounds);
@@ -542,10 +445,10 @@ public final class MainActivity extends Activity {
                     decode.inSampleSize *= 2;
                 Bitmap bitmap = BitmapFactory.decodeByteArray(response.bytes, 0, response.bytes.length, decode);
                 if (bitmap == null) throw new Exception("The Mac sent an undecodable frame.");
-                if (!isCurrent(session)) { bitmap.recycle(); return; }
+                if (!isCurrent(session) || client != connection || !sessions.acceptsCapture(response.captureSession)) { bitmap.recycle(); return; }
                 lastFrameID = response.frameID;
                 receivedFrames++;
-                PendingFrame replaced = pendingFrame.getAndSet(new PendingFrame(session, connection, bitmap));
+                PendingFrame replaced = pendingFrame.getAndSet(new PendingFrame(session, connection, response.captureSession, bitmap));
                 if (replaced != null) replaced.bitmap.recycle();
                 synchronized (this) {
                     if (!framePosted) {
@@ -554,60 +457,78 @@ public final class MainActivity extends Activity {
                     }
                 }
             }
-            delay = captureReady ? Math.max(1, 1000 / fps - (SystemClock.elapsedRealtime() - started)) : (hostAsleep ? 3000 : 500);
+            delay = sessions.captureReady() ? Math.max(1, 1000 / fps - (SystemClock.elapsedRealtime() - started)) : (sessions.hostAsleep() ? 3000 : 500);
         } catch (Exception exception) {
-            if (!isCurrent(session)) return;
-            setCaptureState(session, false);
-            connection.cancel();
-            client = null;
-            routeEndpoint = "";
-            postStatus(session, "Reconnecting · " + connectionError(exception), true);
-            worker.schedule(() -> selectRoute(session, pairing), 300, TimeUnit.MILLISECONDS);
+            connectionFailed(session, connection, exception);
             return;
         }
-        if (isCurrent(session)) worker.schedule(() -> poll(session, pairing, connection, endpoint), delay, TimeUnit.MILLISECONDS);
+        if (isCurrent(session) && sessions.owns(session, connection)) worker.schedule(() -> poll(session, pairing, connection, endpoint), delay, TimeUnit.MILLISECONDS);
     }
 
-    private boolean isCurrent(int session) { return resumed && generation == session; }
+    private boolean isCurrent(int session) { return resumed && sessions.isCurrent(session); }
 
-    private void displayPendingFrame() {
-        synchronized (this) { framePosted = false; }
+    private synchronized void connectionFailed(int session, PinnedClient connection, Exception exception) {
+        if (!isCurrent(session) || !sessions.owns(session, connection)) return;
+        setCaptureState(session, connection, false, "", sessions.hostAsleep());
+        sessions.failed(session, connection);
+        connection.cancel();
+        client = null;
+        routeEndpoint = "";
+        ui.post(() -> {
+            synchronized (MainActivity.this) {
+                if (!isCurrent(session) || client != null) return;
+                if (!sessions.hostAsleep()) frameView.clearFrame();
+                updateFrameInput();
+                updateScreenLock();
+            }
+        });
+        postStatus(session, null, "Reconnecting · " + SessionRouter.connectionError(exception), true);
+        router.reconnect(session);
+    }
+
+    private synchronized void displayPendingFrame() {
+        framePosted = false;
         PendingFrame frame = pendingFrame.getAndSet(null);
         if (frame == null) return;
-        if (!isCurrent(frame.session) || !captureReady || frame.owner != client) frame.bitmap.recycle();
-        else frameView.setFrame(frame.bitmap, frame.session);
+        if (!isCurrent(frame.session) || !sessions.captureReady() || frame.owner != client || !sessions.acceptsCapture(frame.captureSession)) frame.bitmap.recycle();
+        else frameView.setFrame(frame.bitmap, frame.session, frame.captureSession);
     }
 
-    private void setCaptureState(int session, boolean ready) {
-        if (!isCurrent(session)) return;
-        captureReady = ready;
-        if (!ready) {
+    private synchronized void setCaptureState(int session, PinnedClient owner, boolean ready, String reportedSession, boolean asleep) {
+        if (!isCurrent(session) || !sessions.owns(session, owner)) return;
+        boolean changed = sessions.updateCapture(session, owner, ready, reportedSession, asleep);
+        if (!sessions.captureReady() || changed) {
             lastFrameID = -1;
             pendingInput.set(null);
             PendingFrame discarded = pendingFrame.getAndSet(null);
             if (discarded != null) discarded.bitmap.recycle();
         }
+        String expectedCapture = sessions.captureSession();
         ui.post(() -> {
-            if (!isCurrent(session)) return;
-            // While the Mac display sleeps, freeze the last frame instead of
-            // clearing to white; the panel keeps it with zero refreshes.
-            if (!captureReady && !hostAsleep) frameView.clearFrame();
-            updateFrameInput();
+            synchronized (MainActivity.this) {
+                if (!isCurrent(session) || !sessions.owns(session, owner)
+                        || !sessions.captureSession().equals(expectedCapture) || sessions.hostAsleep() != asleep) return;
+                if ((changed || !sessions.captureReady()) && !asleep) frameView.clearFrame();
+                updateFrameInput();
+                updateScreenLock();
+            }
         });
     }
 
     private void updateFrameInput() {
-        frameView.setInput(remoteInputRequested && captureReady, new FrameView.InputListener() {
-            @Override public void tap(double x, double y) { queueInput("tap", x, y); }
-            @Override public void scroll(double delta) { queueInput("scroll", delta, 0); }
+        frameView.setInput(remoteInputRequested && sessions.captureReady(), new FrameView.InputListener() {
+            @Override public void tap(String authority, double x, double y) { queueInput(authority, "tap", x, y); }
+            @Override public void scroll(String authority, double delta) { queueInput(authority, "scroll", delta, 0); }
         });
     }
 
-    private void postStatus(int session, String message, boolean show) {
+    private void postStatus(int session, PinnedClient owner, String message, boolean show) {
         ui.post(() -> {
-            if (!isCurrent(session)) return;
-            status.setText(message);
-            if (show) controls.setVisibility(View.VISIBLE);
+            synchronized (MainActivity.this) {
+                if (!isCurrent(session) || client != owner) return;
+                status.setText(message);
+                if (show) controls.setVisibility(View.VISIBLE);
+            }
         });
     }
 
@@ -616,8 +537,8 @@ public final class MainActivity extends Activity {
         catch (Exception ignored) { }
     }
 
-    private void adoptHostSettings(int session, JSONObject result) {
-        if (!isCurrent(session) || pendingSettings.get() != null) return;
+    private synchronized void adoptHostSettings(int session, PinnedClient owner, JSONObject result) {
+        if (!isCurrent(session) || !sessions.owns(session, owner) || pendingSettings.get() != null) return;
         fps = Math.max(1, Math.min(60, result.optInt("fps", fps)));
         maxWidth = Math.max(600, Math.min(2480, result.optInt("maxWidth", maxWidth)));
         color = !result.optBoolean("grayscale", !color);
@@ -626,17 +547,19 @@ public final class MainActivity extends Activity {
         preferences.edit().putInt("fps", fps).putInt("maxWidth", maxWidth).putBoolean("color", color)
                 .putFloat("jpegQuality", (float) jpegQuality).apply();
         ui.post(() -> {
-            if (!isCurrent(session)) return;
-            updatingControls = true;
-            colorControl.setChecked(color);
-            updatingControls = false;
+            synchronized (MainActivity.this) {
+                if (!isCurrent(session) || !sessions.owns(session, owner)) return;
+                updatingControls = true;
+                colorControl.setChecked(color);
+                updatingControls = false;
+            }
         });
     }
 
-    private void queueInput(String type, double first, double second) {
-        if (!captureReady || !resumed) return;
+    private void queueInput(String authority, String type, double first, double second) {
+        if (!sessions.captureReady() || !resumed || !sessions.acceptsCapture(authority)) return;
         try {
-            JSONObject event = new JSONObject().put("type", type);
+            JSONObject event = new JSONObject().put("type", type).put("capture_session", authority);
             if ("tap".equals(type)) event.put("x", first).put("y", second);
             else event.put("deltaY", first);
             pendingInput.set(event);
@@ -748,7 +671,7 @@ public final class MainActivity extends Activity {
     @SuppressWarnings("deprecation")
     private void updateScreenLock() {
         if (powerManager == null) return;
-        if (resumed && !hostAsleep) {
+        if (resumed && !sessions.hostAsleep()) {
             if (screenLock == null || !screenLock.isHeld()) {
                 releaseScreenLock();
                 screenLock = powerManager.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
@@ -783,9 +706,11 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        resumed = false;
         stopSession();
+        releaseWakeLocks();
         worker.shutdownNow();
-        usbProbeWorker.shutdownNow();
+        router.close();
         discovery.stop();
         frameView.clearFrame();
         super.onDestroy();
@@ -814,9 +739,9 @@ public final class MainActivity extends Activity {
 
     private void networkChanged(boolean refreshDiscovery) {
         if (!resumed) return;
-        nextUsbProbeAt = 0;
+        router.networkChanged();
         if (refreshDiscovery) startDiscovery();
-        if (client == null && SystemClock.elapsedRealtime() - lastConnectRequest > 1000) startSession();
+        if (client == null && !sessions.hostAsleep() && SystemClock.elapsedRealtime() - lastConnectRequest > 1000) startSession();
     }
 
     private void stopNetworkMonitoring() {
@@ -828,23 +753,6 @@ public final class MainActivity extends Activity {
             try { unregisterReceiver(powerReceiver); } catch (RuntimeException ignored) { }
         }
         powerReceiver = null;
-    }
-
-    private static final class Pairing {
-        final String token, pin, hostId, wifi, mode;
-        Pairing(String token, String pin, String hostId, String wifi, String mode) {
-            this.token = token; this.pin = pin; this.hostId = hostId; this.wifi = wifi;
-            this.mode = "usb".equals(mode) || "wifi".equals(mode) ? mode : "auto";
-        }
-    }
-    private static final class VerifiedRoute {
-        final int session;
-        final PinnedClient client;
-        final String endpoint;
-        final JSONObject status;
-        VerifiedRoute(int session, PinnedClient client, String endpoint, JSONObject status) {
-            this.session = session; this.client = client; this.endpoint = endpoint; this.status = status;
-        }
     }
 
     private LinearLayout row() {
@@ -886,6 +794,9 @@ public final class MainActivity extends Activity {
         final int session;
         final Bitmap bitmap;
         final PinnedClient owner;
-        PendingFrame(int session, PinnedClient owner, Bitmap bitmap) { this.session = session; this.owner = owner; this.bitmap = bitmap; }
+        final String captureSession;
+        PendingFrame(int session, PinnedClient owner, String captureSession, Bitmap bitmap) {
+            this.session = session; this.owner = owner; this.captureSession = captureSession; this.bitmap = bitmap;
+        }
     }
 }

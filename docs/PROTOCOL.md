@@ -1,32 +1,38 @@
-# BOOX Sidecar v0.3 — protocol 1
+# BOOX Sidecar — protocol 2
 
-Application version 0.3 retains wire protocol 1 and adds optional status fields. Defaults are color (`grayscale=false`), `maxWidth=1240`, and up to 60 requested frames per second. Requested capture/poll FPS is not a guarantee of delivered frames or physical e-ink refresh.
+Protocol 2 introduces authenticated native USB and versioned pairing. Defaults are color (`grayscale=false`), `maxWidth=1240`, and up to 60 requested frames per second. Requested capture/poll FPS is not a guarantee of delivered frames or physical e-ink refresh.
 
 ## Transports and pairing
 
-- **USB:** loopback HTTP at `127.0.0.1:8787`; `adb reverse tcp:8787 tcp:8787` forwards the tablet's loopback port to the Mac. The browser remains an optional USB fallback.
-- **Wi-Fi:** a separate TLS listener on port 8788, enabled explicitly in the Mac app. USB provisioning transfers the Mac endpoint, persistent pairing token and SHA-256 certificate fingerprint to the native Android app. Both devices need a reachable network route. No cloud relay is involved.
-- The legacy `--lan` option exposes development-only plaintext HTTP. It is separate from encrypted Wi-Fi, and the native receiver rejects non-loopback plaintext HTTP. Do not use `--lan` for normal wireless pairing.
+Protocol 2 requires macOS 15+ and an updated native receiver. Upgrade both apps and re-pair once over authorized USB. Legacy saved records and plaintext native clients are rejected; there is no insecure compatibility fallback.
 
-Normal launches load or securely create a persistent random 32-byte token encoded as 64 hexadecimal characters. It is stored in `~/Library/Application Support/BOOX Sidecar/pairing-token` with mode 0600 inside a mode-0700 directory. Invalid saved credentials fail closed; **Forget pairing** rotates the credential and stops sharing. Demo mode uses an ephemeral credential and does not read or overwrite the saved one. All `/api/` requests require `Authorization: Bearer TOKEN`; tokens never appear in API query strings. Static viewer resources and `GET /health` are public. A normal host restart preserves pairing; credential rotation requires pairing again.
+USB uses pinned TLS at `https://127.0.0.1:8787` over ADB reverse. Wi-Fi uses a separate optional TLS listener on 8788. `--port` and `--wifi-port` configure the respective endpoints; provisioning and Bonjour carry the actual ports. Turning off Wi-Fi does not disable secure USB. Discovery provides candidate addresses, never replacement trust.
 
-The native Activity accepts provisioning extras `host`, `token`, `host_id`, and, for HTTPS, `cert_sha256`. HTTPS requires the normalized `host_id` and certificate pin to agree. USB may use a separate stable host identity when TLS is unavailable. The pin is SHA-256 over the exact leaf certificate's DER encoding. Endpoint, token and pin are validated before changes are stored. USB and Wi-Fi configurations are retained in private app storage with backup/device-transfer exclusions. Auto mode tries USB loopback first, then discovered/saved HTTPS routes. It periodically probes USB while on Wi-Fi and verifies authenticated `host_id` before changing routes. Explicit USB-only and Wi-Fi-only preferences remain available. It never falls back to plaintext LAN HTTP. Clearing saved pairing removes stored credentials.
+The Mac persists an independent random installation ID and a 32-byte bearer credential (`pairing-token-v2`) under `~/Library/Application Support/BOOX Sidecar/`. Directory permissions are 0700; private files are 0600. The v2 credential replaces the old credential for authentication. Normal restarts retain pairing; **Forget pairing** stops sharing and rotates the token without changing the installation ID or key. A full identity reset requires trusted re-pairing. Demo and development-browser modes never read or write native pairing state.
 
-The Android HTTPS client checks certificate validity and constant-time pin equality. Its connection-scoped hostname verifier accepts only the configured host after checking the pin. Redirects are rejected. No system-wide trust or hostname-verification override is installed. The Mac stores its app-local certificate/private key under `~/Library/Application Support/BOOX Sidecar/TLS`, using restrictive file permissions. The identity persists across launches; changing it requires re-pairing. TLS import is memory-only and requires macOS 15+; USB supports macOS 14+.
+A dedicated Android `.ProvisioningReceiver` requires `android.permission.DUMP`. The public launcher ignores pairing extras. The restricted receiver validates a complete payload before committing saved state and returns result code `-1` only when the pairing is saved; the Mac then opens the launcher activity:
 
-The Mac **Connect** action prepares the extended desktop/capture and TLS listener, establishes ADB reverse, provisions authorized attached BOOX devices, and watches for USB reconnects. Disconnect stops capture, discovery/listening and the virtual display, retaining pairing. Bonjour advertises `_boox-sidecar._tcp.` on port 8788 with a public `host_id` TXT field and no bearer token. Discovery supplies candidate addresses only; matching the advertisement does not authenticate a server. The native client still requires its saved pin/token and authenticated status identity.
+- `pairing_version`: integer 2.
+- `host_id`: independent lowercase 64-hex installation ID, not an authentication secret.
+- `token`: 64-hex bearer credential.
+- `spki_sha256`: SHA-256 over the leaf certificate's DER SubjectPublicKeyInfo, encoded as lowercase hex.
+- `usb_host`: HTTPS endpoint on 127.0.0.1 with an explicit port.
+- `host`: primary HTTPS endpoint; optional `wifi_host` retains a Wi-Fi route even when USB is preferred.
+- `preferred_transport`: optional `auto`, `usb`, or `wifi`. When `preferred_transport` or `wifi_host` is omitted for the same host ID and pin, the saved value is kept.
 
-When TLS identity is available, `host_id` is the lowercase 64-hex SHA-256 certificate fingerprint. When TLS is unavailable, the USB-only host identity is SHA-256 over the persistent token's UTF-8 bytes. This public hash does not replace bearer authentication. A later TLS identity can change `host_id` and require USB reprovisioning.
+Both native transports and Auto probes check certificate validity, the pinned public key, and TLS key possession before sending application credentials. Redirects are rejected. The connection-scoped hostname verifier uses the provisioned key as identity and restricts requests to the configured endpoint; no global TLS bypass is installed. Authenticated status must report protocol 2 and the saved installation ID. USB-only provisioning retains trust for subsequent Wi-Fi discovery.
 
-The browser accepts a manual token or `#token=...`, removes a supplied token fragment from the address bar, and keeps credentials only in memory/sessionStorage. It does not provide native certificate pinning or BOOX hardware refresh control.
+The canonical TLS identity is published atomically as a private PKCS12 file, imported in memory. Certificates renew with the same key when fewer than 30 days remain, checked at startup and daily. Renewal failures retain an otherwise valid identity and are reported locally; expired identities stop native connections. Deliberate key replacement requires USB re-pairing. Neither a matching public host ID nor a discovery advertisement authorizes a key change.
+
+Browser resources are available only with `--development-browser` or synthetic `--demo`. Development browser mode uses loopback HTTP and a disposable in-memory credential, can use locally approved real capture/input, and disables native provisioning and LAN listeners. Its insecure transport must not be used for normal native pairing. `--lan` is rejected. The browser removes a supplied `#token=...` fragment from its address bar and keeps the token in session storage.
 
 ## HTTP contract
 
-Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. The default HTTP listener validates loopback Host headers. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
+Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is public. Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. Loopback listeners validate Host headers, including native USB TLS. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
 
 | Endpoint | Response / behavior |
 | --- | --- |
-| `GET /health` | `{"ok":true,"protocol":1}` |
+| `GET /health` | `{"ok":true,"protocol":2}` |
 | `GET /api/status` | Status object below |
 | `GET /api/displays` | `{"displays":[{"id":UInt32,"name":String,"width":Int,"height":Int}]}` |
 | `POST /api/settings` | Partial settings object; returns status |
@@ -36,7 +42,7 @@ Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, w
 Status fields:
 
 ```text
-protocol: 1
+protocol: 2
 capturing, permission, inputEnabled, demo: Bool
 frameID, width, height, fps, maxWidth, jpegBytes: Int
 jpegQuality, encodeMilliseconds: Number
@@ -44,22 +50,22 @@ grayscale: Bool
 displayID, virtualDisplayID: UInt32
 extendedDesktop, wirelessEnabled: Bool
 wirelessAddresses: [String]
-fingerprint, host_id, message: String
+spki_sha256, host_id, capture_session, message: String
 displayAsleep: Bool
 position: "left" | "right"
 ```
 
-`width`/`height` describe the latest encoded frame and can be zero before a frame exists. `displayAsleep` reports that macOS put the display to sleep: capture pauses and automatically resumes on wake, so a receiver should keep its last frame, reduce polling and avoid clearing to a blank screen. `extendedDesktop` means the selected source is the host-created virtual display. `virtualDisplayID=0` means none exists. `fingerprint` is public certificate identity, not a replacement for bearer authentication. `host_id` is a public, non-secret identity included in authenticated status and Bonjour; `/health` remains only `ok` and `protocol`. `jpegBytes` and `encodeMilliseconds` describe the latest frame, not end-to-end latency. Clients should tolerate additional fields.
+`width`/`height` describe the latest encoded frame and can be zero before a frame exists. `displayAsleep` reports that macOS put the display to sleep: capture pauses and automatically resumes on wake, so a receiver should keep its last frame, reduce polling and avoid clearing to a blank screen. `extendedDesktop` means the selected source is the host-created virtual display. `virtualDisplayID=0` means none exists. `spki_sha256` is the public-key pin, not a replacement for bearer authentication. `host_id` is a public, non-secret identity included in authenticated status and Bonjour; `/health` remains only `ok` and `protocol`. `jpegBytes` and `encodeMilliseconds` describe the latest frame, not end-to-end latency. Clients should tolerate additional fields.
 
-Settings accept `fps` (integer 1–60), `grayscale` (Boolean), `maxWidth` (integer 600–2480), `jpegQuality` (number 0.4–0.95), and `displayID` (existing display). Unknown keys and invalid types/ranges are rejected. Changing capture settings restarts an active stream. Capture start/stop and virtual-display creation/removal remain local Mac actions; there is no remote capture-start endpoint.
+Settings accept `fps` (integer 1–60), `grayscale` (Boolean), `maxWidth` (integer 600–2480), `jpegQuality` (number 0.4–0.95). Display selection is restricted to the local Mac UI. Any remote payload containing `displayID` is rejected with HTTP 403 before applying other fields. Unknown keys and invalid types/ranges are rejected. Changing capture settings restarts an active stream. Capture start/stop and virtual-display creation/removal remain local Mac actions; there is no remote capture-start endpoint.
 
-JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, and `X-Frame-Height`. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has one network/decode worker, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
+JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, `X-Frame-Height`, and `X-Capture-Session`. Status reports `capture_session` (empty while stopped); input requests must include the matching `capture_session`. Session changes invalidate pending frames and input. Stop, source loss, capture permission errors, and Forget pairing revoke queued sends and cancel sensitive connections. Already transmitted bytes cannot be retracted. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has one network/decode worker, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It retains the last frame while `displayAsleep` is true, and otherwise clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
 
 Input payloads:
 
 ```json
-{"type":"tap","x":0.5,"y":0.5}
-{"type":"scroll","deltaY":300}
+{"type":"tap","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"scroll","deltaY":300,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
 ```
 
 Tap coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Scroll ranges from -1000 to 1000; positive means up. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.
@@ -68,7 +74,7 @@ Errors use `{"error":"human readable message"}`. Unknown paths return 404, wrong
 
 ## Display and refresh integration
 
-The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz, arranged to the right in extended rather than mirrored mode. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
+The Mac's isolated Objective-C backend creates a 1240 × 930 logical, 2480 × 1860 HiDPI virtual display at nominal 60 Hz in extended rather than mirrored mode. It restores a valid saved position. Local Left/Right selection replaces that position, preferring the chosen side of the main display and falling back outside the other displays to avoid overlap. Status `position` reports the preferred side. This uses undocumented CoreGraphics interfaces and is experimental. It supplies a capture source; it does not determine the BOOX panel's waveform or physical refresh rate.
 
 The native Android receiver renders bitmaps directly using Canvas, without WebView or JavaScript bridges. Optional refresh controls discover the firmware's public `android.onyx.optimization.EInkHelper` app-scoped APIs and symbolic mode constants. Existing mode is preserved until the user chooses another. **Faster panel…** explicitly requests X mode after explaining reduced detail/ghosting; stream presets never imply waveform changes. Readiness and delayed readback are required because vendor setters may swallow errors. Blocked hidden APIs are not bypassed. Full refresh is offered only when a supported SDK API exists; otherwise direct the user to BOOX E Ink Center. Browser **Reload frame** never means a hardware panel refresh.
 

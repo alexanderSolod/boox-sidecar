@@ -20,12 +20,12 @@
   var $ = function (id) { return document.getElementById(id); };
   var active = false, generation = 0, session = null, token = '', status = null;
   var frameID = -1, currentURL = null, timer = null, lastStatusAt = 0, failures = 0, fit = true, pendingSettings = false, frameRevision = 0;
-  var initialized = false, desiredSettings = null;
+  var initialized = false, knownDisplays = [], cancelDecode = null;
   var frame = $('frame');
   function notice(message, error) { $('notice').textContent = message; $('notice').classList.toggle('error', !!error); }
   function panel(id, button, visible) { $(id).hidden = !visible; $(button).setAttribute('aria-expanded', String(visible)); }
   function updateControls() {
-    var allowed = active && initialized && !pendingSettings && status && status.capturing && status.inputEnabled && failures === 0;
+    var allowed = active && initialized && !pendingSettings && status && status.capturing && status.permission && status.capture_session && status.inputEnabled && failures === 0;
     $('control').disabled = !allowed;
     if (!allowed) $('control').checked = false;
     var control = allowed && $('control').checked;
@@ -35,14 +35,19 @@
     $('reload').disabled = !active;
     $('disconnect').disabled = !active;
     $('connect').disabled = active;
-    $('display').disabled = !active || !initialized || pendingSettings;
-    ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).disabled = pendingSettings || (active && !initialized); });
+    ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).disabled = !active || !initialized || pendingSettings; });
     $('frameInfo').textContent = (status && frameID >= 0 ? status.width + ' × ' + status.height + ' · ' : '') + (control ? 'Control enabled' : 'Viewing only');
   }
+  function clearFrame() {
+    frameRevision += 1; frameID = -1;
+    if (cancelDecode) { var cancel = cancelDecode; cancelDecode = null; cancel(); }
+    frame.hidden = true; frame.removeAttribute('src'); $('placeholder').hidden = false;
+    if (currentURL) URL.revokeObjectURL(currentURL);
+    currentURL = null; $('control').checked = false;
+  }
   function applyStatus(next) {
-    if ((status && next.displayID !== status.displayID) || (Number.isFinite(next.frameID) && next.frameID < frameID)) { frameID = -1; frameRevision += 1; }
+    if (!next.capturing || !next.permission || (status && (next.displayID !== status.displayID || next.capture_session !== status.capture_session)) || (Number.isFinite(next.frameID) && next.frameID < frameID)) clearFrame();
     status = next;
-    if (!next.capturing || !next.permission) { frame.hidden = true; $('placeholder').hidden = false; frameID = -1; }
     var fps = String(next.fps || 60), fpsSelect = $('fps');
     if (!Array.from(fpsSelect.options || fpsSelect.children).some(function (option) { return String(option.value) === fps; })) {
       var customFPS = document.createElement('option'); customFPS.value = fps; customFPS.textContent = fps; fpsSelect.appendChild(customFPS);
@@ -56,19 +61,23 @@
       }
       select.value = width;
     }
-    if (next.displayID != null) $('display').value = String(next.displayID);
+    updateDisplay();
     $('connection').textContent = next.capturing && next.permission ? 'Connected · live' : 'Connected · waiting';
     $('guidance').textContent = statusMessage(next);
     notice(statusMessage(next));
     updateControls();
   }
+  function updateDisplay() {
+    var source = status && knownDisplays.find(function (display) { return display.id === status.displayID; });
+    $('display').textContent = source ? source.name + ' · ' + source.width + ' × ' + source.height : (status && status.displayID != null ? 'Display ' + status.displayID + ' · selected on Mac' : 'Waiting for Mac');
+  }
   function stop(clearToken) {
     active = false; generation += 1;
     if (session) session.abort();
     clearTimeout(timer); timer = null; status = null; frameID = -1; pendingSettings = false; initialized = false;
-    frame.hidden = true; frame.removeAttribute('src'); $('placeholder').hidden = false;
-    if (currentURL) URL.revokeObjectURL(currentURL);
-    currentURL = null;
+    clearFrame();
+    $('display').textContent = 'Waiting for Mac';
+    knownDisplays = [];
     $('connection').textContent = 'Not connected';
     $('guidance').textContent = 'Connect above to start viewing a display.';
     if (clearToken) { token = ''; $('token').value = ''; try { sessionStorage.removeItem('booxToken'); } catch (_) {} }
@@ -93,7 +102,7 @@
         var error = new Error(message); error.status = response.status; throw error;
       }
       // Consume the body under the same timeout and cancellation signal.
-      if (path.indexOf('/api/frame') === 0) return response.status === 204 ? null : { blob: await response.blob(), id: Number(response.headers.get('X-Frame-ID')) };
+      if (path.indexOf('/api/frame') === 0) return response.status === 204 ? null : { blob: await response.blob(), id: Number(response.headers.get('X-Frame-ID')), captureSession: response.headers.get('X-Capture-Session') };
       return await response.json();
     } finally { clearTimeout(timeout); parent.removeEventListener('abort', abort); }
   }
@@ -106,6 +115,7 @@
     }
     if (error.code === 'PROTOCOL') { stop(false); panel('pairPanel', 'pairButton', true); notice(error.message, true); return; }
     failures += 1;
+    clearFrame();
     $('connection').textContent = 'Connection interrupted';
     notice('Cannot reach the Mac: ' + (error.name === 'AbortError' ? 'request timed out' : error.message) + '. Check USB and the host app. Retrying…', true);
     updateControls();
@@ -117,10 +127,13 @@
       function finish(error) {
         if (done) return; done = true; clearTimeout(timeout); parent.removeEventListener('abort', aborted);
         image.onload = null; image.onerror = null;
+        if (cancelDecode === stale) cancelDecode = null;
         if (error || run !== generation) { URL.revokeObjectURL(url); reject(error || new Error('Obsolete session')); }
         else resolve({ image: image, url: url });
       }
       function aborted() { finish(new Error('Obsolete session')); }
+      function stale() { var error = new Error('Obsolete capture session'); error.code = 'STALE_FRAME'; finish(error); image.removeAttribute('src'); }
+      cancelDecode = stale;
       var timeout = setTimeout(function () { finish(new Error('Frame decoding timed out')); }, 8000);
       parent.addEventListener('abort', aborted);
       image.onload = function () { finish(); };
@@ -130,7 +143,7 @@
     });
   }
   function validateProtocol(next) {
-    if (next.protocol !== 1) { var error = new Error('This host uses an unsupported protocol. Update the viewer and host together.'); error.code = 'PROTOCOL'; throw error; }
+    if (next.protocol !== 2 || (next.capturing && (typeof next.capture_session !== 'string' || !next.capture_session))) { var error = new Error('This host uses an unsupported protocol. Update the viewer and host together.'); error.code = 'PROTOCOL'; throw error; }
   }
   async function initialize(run) {
     var next = await request('/api/status', {}, run);
@@ -138,12 +151,8 @@
     validateProtocol(next);
     var displays = await request('/api/displays', {}, run);
     if (run !== generation) return;
-    var configured = await request('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(desiredSettings) }, run);
-    if (run !== generation) return;
-    validateProtocol(configured);
-    $('display').replaceChildren();
-    displays.displays.forEach(function (display) { var option = document.createElement('option'); option.value = display.id; option.textContent = display.name + ' · ' + display.width + ' × ' + display.height; $('display').appendChild(option); });
-    initialized = true; failures = 0; lastStatusAt = Date.now(); applyStatus(configured);
+    knownDisplays = displays.displays;
+    initialized = true; failures = 0; lastStatusAt = Date.now(); applyStatus(next);
     panel('pairPanel', 'pairButton', false);
   }
   async function poll(run) {
@@ -157,15 +166,25 @@
         var next = await request('/api/status', {}, run);
         if (run !== generation) return;
         validateProtocol(next);
-        if (statusRevision === frameRevision && !pendingSettings) { failures = 0; lastStatusAt = Date.now(); applyStatus(next); }
+        if (statusRevision === frameRevision && !pendingSettings) {
+          failures = 0; lastStatusAt = Date.now(); applyStatus(next);
+          var displayRevision = frameRevision;
+          var displays = await request('/api/displays', {}, run);
+          if (run !== generation) return;
+          if (displayRevision === frameRevision && !pendingSettings) { knownDisplays = displays.displays; updateDisplay(); }
+        }
       }
-      if (status.capturing && status.permission && !pendingSettings) {
-        var revision = frameRevision;
+      if (status && status.capturing && status.permission && !pendingSettings) {
+        var revision = frameRevision, captureSession = status.capture_session;
         var result = await request('/api/frame?after=' + frameID, {}, run);
         if (run !== generation) return;
         if (result && revision === frameRevision) {
+          if (result.captureSession !== captureSession) {
+            clearFrame(); status = null; lastStatusAt = 0; updateControls();
+            var mismatch = new Error('Obsolete capture session'); mismatch.code = 'STALE_FRAME'; throw mismatch;
+          }
           var decoded = await decode(result.blob, run);
-          if (run !== generation || revision !== frameRevision) { URL.revokeObjectURL(decoded.url); }
+          if (run !== generation || revision !== frameRevision || !status || captureSession !== status.capture_session) { URL.revokeObjectURL(decoded.url); }
           else {
           decoded.image.id = 'frame'; decoded.image.alt = 'Live view of the selected Mac display'; decoded.image.draggable = false;
           frame.replaceWith(decoded.image); frame = decoded.image;
@@ -176,29 +195,27 @@
           }
         }
       }
-    } catch (error) { handleError(error, run); }
+    } catch (error) { if (error.code !== 'STALE_FRAME') handleError(error, run); }
     if (active && run === generation) timer = setTimeout(function () { poll(run); }, failures ? Math.min(8000, 1000 * Math.pow(2, failures - 1)) : frameDelay(status && status.fps, Date.now() - started));
   }
   async function connect(event) {
     event.preventDefault();
     var supplied = $('token').value.trim();
-    var desired = { fps: Number($('fps').value), grayscale: $('grayscale').checked, maxWidth: Number($('maxWidth').value) };
     if (!supplied) return;
     stop(false); token = supplied; active = true; session = new AbortController(); failures = 0; lastStatusAt = 0;
     var run = generation;
     try { sessionStorage.setItem('booxToken', token); } catch (_) {}
     $('connection').textContent = 'Connecting…'; notice('Connecting to the Mac host…'); updateControls();
-    desiredSettings = desired;
     poll(run);
   }
 
   async function settings(event) {
     if (!active || !initialized || pendingSettings) return;
     var key = event.target.id;
+    if (!['fps', 'grayscale', 'maxWidth'].includes(key)) return;
     var value = key === 'grayscale' ? event.target.checked : Number(event.target.value);
-    var payload = {}; payload[key === 'display' ? 'displayID' : key] = value;
+    var payload = {}; payload[key] = value;
     var run = generation; pendingSettings = true; frameRevision += 1; frameID = -1;
-    if (key === 'display') { frame.hidden = true; $('placeholder').hidden = false; $('guidance').textContent = 'Switching display…'; }
     updateControls();
     try {
       var next = await request('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run);
@@ -210,6 +227,7 @@
   async function input(payload) {
     if (!active || !status || !status.inputEnabled || !$('control').checked || $('control').disabled) return;
     var run = generation;
+    payload = Object.assign({}, payload, { capture_session: status.capture_session });
     try { await request('/api/input', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }, run); }
     catch (error) { if (run !== generation) return; $('control').checked = false; updateControls(); if (error.status === 401) handleError(error, run); else notice('Mac control is unavailable: ' + error.message + '. Enable input and Accessibility permission on the Mac.', true); }
   }
@@ -217,7 +235,7 @@
   $('disconnect').addEventListener('click', function () { stop(true); panel('pairPanel', 'pairButton', true); notice('Disconnected. Paste a session token to reconnect.'); });
   $('pairButton').addEventListener('click', function () { panel('pairPanel', 'pairButton', $('pairPanel').hidden); });
   $('settingsButton').addEventListener('click', function () { panel('settingsPanel', 'settingsButton', $('settingsPanel').hidden); });
-  ['fps', 'grayscale', 'maxWidth', 'display'].forEach(function (id) { $(id).addEventListener('change', settings); });
+  ['fps', 'grayscale', 'maxWidth'].forEach(function (id) { $(id).addEventListener('change', settings); });
   $('control').addEventListener('change', updateControls);
   $('scrollUp').addEventListener('click', function () { input({ type: 'scroll', deltaY: 300 }); });
   $('scrollDown').addEventListener('click', function () { input({ type: 'scroll', deltaY: -300 }); });
@@ -227,6 +245,7 @@
   $('fullscreen').addEventListener('click', async function () { try { if (document.fullscreenElement) await document.exitFullscreen(); else if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); else notice('Fullscreen is not supported by this browser.'); } catch (_) { notice('The browser could not enter fullscreen.'); } });
   document.addEventListener('fullscreenchange', function () { $('fullscreen').textContent = document.fullscreenElement ? 'Exit fullscreen' : 'Fullscreen'; });
   root.addEventListener('pagehide', function () { stop(false); });
+  updateControls();
   var hashToken = tokenFromHash(root.location.hash);
   try { $('token').value = hashToken || sessionStorage.getItem('booxToken') || ''; } catch (_) { $('token').value = hashToken; }
   if (hashToken) { try { history.replaceState(null, '', root.location.pathname + root.location.search); } catch (_) {} }
