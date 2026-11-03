@@ -116,7 +116,9 @@ static void DisplayConfigurationChanged(CGDirectDisplayID display, CGDisplayChan
         if (!display) { _lastError = @"macOS refused to create the virtual display."; return 0; }
         CGVirtualDisplaySettings *settings = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
         settings.hiDPI = 1;
-        CGVirtualDisplayMode *mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc] initWithWidth:(portrait ? 930 : 1240) height:(portrait ? 1240 : 930) refreshRate:60.0];
+        // Portrait uses fewer logical points (620x827) so UI renders ~1.5x
+        // larger on the panel; the HiDPI buffer stays 1240x1654 for a sharp stream.
+        CGVirtualDisplayMode *mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc] initWithWidth:(portrait ? 620 : 1240) height:(portrait ? 827 : 930) refreshRate:60.0];
         if (!mode) { _lastError = @"macOS refused the BOOX display mode."; return 0; }
         settings.modes = @[mode];
         if (![display applySettings:settings]) { _lastError = @"macOS could not apply the BOOX display mode."; return 0; }

@@ -60,7 +60,7 @@ unfreeze **BOOX Sidecar** in BOOX app management.
 ## 3. Connect
 
 1. Open both apps. Click **Connect** on the Mac — that one action creates the BOOX desktop
-   (1240 × 930 logical; Portrait toggles it to 930 × 1240), starts capture, enables
+   (1240 × 930 logical; Portrait toggles it to 620 × 827 with larger UI), starts capture, enables
    encrypted Wi-Fi on port 8788, sets up the USB tunnel and provisions the tablet.
 2. Move windows onto the BOOX using your Mac's display arrangement. Use **Left/Right**
    in the app to choose which side the desktop sits on.
