@@ -1,13 +1,15 @@
-# Install and launch — v0.3.0 release
+# Install and launch — v0.4.0 release
 
-These steps describe the v0.3.0 release assets using protocol 1. Current source builds use protocol 2, require macOS 15+, and require updating both apps and pairing again over USB. The plaintext status command below applies only to the older release. See [README.md](../README.md) for current-source behavior.
+These steps describe the v0.4.0 release assets using protocol 2 (pinned TLS on USB and
+Wi-Fi). Upgrading from v0.3.x? Update **both** apps — old pairing records are rejected,
+so pair once over USB again. See [README.md](../README.md) for current-source behavior.
 
 Release assets:
 
 | Asset | Contents |
 | --- | --- |
-| `BOOX-Sidecar-v0.3.0-macOS.zip` | Ad-hoc-signed Mac host app (macOS 14+; encrypted Wi-Fi needs macOS 15+) |
-| `BOOX-Sidecar-v0.3.0.apk` | Debug-signed Android receiver (Android 8+; built for BOOX e-ink tablets) |
+| `BOOX-Sidecar-v0.4.0-macOS.zip` | Self-signed Mac host app (macOS 15+) |
+| `BOOX-Sidecar-v0.4.0.apk` | Debug-signed Android receiver (Android 8+; built for BOOX e-ink tablets) |
 
 Verify downloads against `SHA256SUMS.txt` in the same release:
 
@@ -18,8 +20,8 @@ shasum -a 256 -c SHA256SUMS.txt
 ## 1. Mac host app
 
 ```sh
-unzip BOOX-Sidecar-v0.3.0-macOS.zip
-xattr -dr com.apple.quarantine "BOOX Sidecar.app"   # required: ad-hoc signed, not notarized
+unzip BOOX-Sidecar-v0.4.0-macOS.zip
+xattr -dr com.apple.quarantine "BOOX Sidecar.app"   # required: locally signed, not notarized
 open "BOOX Sidecar.app"
 ```
 
@@ -34,11 +36,9 @@ Then quit the app, re-add the exact `.app` under
 System Settings → Privacy & Security → Screen & System Audio Recording, and reopen it.
 This step cannot be fully automated — it is a user consent gate.
 
-Release assets are ad-hoc signed, so the grant must be re-approved after replacing the
-app with a *differently signed* copy. Builds from `scripts/build-mac.sh` instead use a
-persistent self-signed `BOOX Sidecar Dev` identity (`scripts/create-signing-identity.sh`,
-auto-created on first build); grants then survive rebuilds. The first build may show one
-keychain "Always allow" prompt.
+Release assets are self-signed with the same `BOOX Sidecar Dev` identity that
+`scripts/build-mac.sh` creates and reuses, so grants survive same-identity rebuilds and
+replacements. Replacing the app with a *differently signed* copy requires re-approval.
 
 ## 2. Android receiver (BOOX)
 
@@ -47,9 +47,9 @@ the BOOX on USB with **USB debugging authorized** (Settings → Developer option
 
 ```sh
 adb devices                                     # expect: <serial>  device  (not "unauthorized")
-adb install -r BOOX-Sidecar-v0.3.0.apk
+adb install -r BOOX-Sidecar-v0.4.0.apk
 adb shell pm enable local.boox.sidecar          # BOOX may auto-freeze new apps
-adb reverse tcp:8787 tcp:8787                   # USB tunnel
+adb reverse tcp:8787 tcp:8787                   # USB tunnel (TLS on both ends)
 adb shell am start -n local.boox.sidecar/.MainActivity
 ```
 
@@ -60,20 +60,21 @@ unfreeze **BOOX Sidecar** in BOOX app management.
 ## 3. Connect
 
 1. Open both apps. Click **Connect** on the Mac — that one action creates the BOOX desktop
-   (1240 × 930 logical, to the right of the main display), starts capture, enables encrypted
-   Wi-Fi on port 8788, sets up the USB tunnel and provisions the tablet.
-2. Move windows across the Mac screen's right edge onto the BOOX.
+   (1240 × 930 logical; Portrait toggles it to 930 × 1240), starts capture, enables
+   encrypted Wi-Fi on port 8788, sets up the USB tunnel and provisions the tablet.
+2. Move windows onto the BOOX using your Mac's display arrangement. Use **Left/Right**
+   in the app to choose which side the desktop sits on.
 3. Later sessions need no cable: the tablet remembers this Mac and prefers USB when present,
    otherwise the pinned Wi-Fi route on the same network.
 
 First-time pairing needs USB attached; afterwards Wi-Fi alone is enough.
 
-## Verify the v0.3.0 release
+## Verify the release
 
 ```sh
-TOKEN=$(cat "$HOME/Library/Application Support/BOOX Sidecar/pairing-token")
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/status
-# expect: "capturing":true, "extendedDesktop":true, "wirelessEnabled":true
+TOKEN=$(cat "$HOME/Library/Application Support/BOOX Sidecar/pairing-token-v2")
+curl -sk -H "Authorization: Bearer $TOKEN" https://127.0.0.1:8787/api/status
+# expect: "protocol":2, "capturing":true, "extendedDesktop":true
 adb logcat -d -s BooxSidecar:* | tail
 # expect: "Authenticated route connected: USB" (or "pinned Wi-Fi"), then "First native frame drawn"
 ```
