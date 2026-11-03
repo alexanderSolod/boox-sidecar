@@ -67,6 +67,15 @@ struct HostView: View {
                             Text("of your displays").font(.caption).foregroundStyle(.secondary)
                             Spacer()
                         }
+                        HStack {
+                            Text("Orientation")
+                            Picker("Orientation", selection: Binding(get: { host.displayOrientation }, set: { host.setOrientation($0) })) {
+                                Text("Landscape").tag("landscape")
+                                Text("Portrait").tag("portrait")
+                            }.pickerStyle(.segmented).labelsHidden().frame(width: 170).disabled(host.creatingExtendedDisplay)
+                            Text("recreates the BOOX desktop").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                        }
                         Text("\(host.maxWidth) px · \(host.fps) capture FPS · \(host.grayscale ? "Grayscale" : "Color") · JPEG \(Int(host.jpegQuality * 100))%")
                             .font(.callout).foregroundStyle(.secondary)
                         Text("1240 px matches the panel's color resolution. Sharp text uses the full 2480 px black-and-white resolution. E-ink refresh speed depends on the BOOX refresh mode; capture FPS is not panel FPS.").font(.caption).foregroundStyle(.secondary)

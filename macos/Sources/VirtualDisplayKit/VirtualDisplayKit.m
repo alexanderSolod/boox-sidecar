@@ -86,21 +86,22 @@ static void DisplayConfigurationChanged(CGDirectDisplayID display, CGDisplayChan
 - (CGDirectDisplayID)displayID { return _display ? _display.displayID : kCGNullDirectDisplay; }
 - (NSString *)lastError { return _lastError; }
 
-- (CGDirectDisplayID)createExtendedDisplay {
+- (CGDirectDisplayID)createExtendedDisplayWithOrientation:(BXDisplayOrientation)orientation {
     NSAssert([NSThread isMainThread], @"Create displays on the main thread");
     if (_display) return _display.displayID;
     _lastError = nil;
     if (!_observingConfiguration) { _lastError = @"Could not observe display configuration changes."; return 0; }
     atomic_fetch_add_explicit(&_displayGeneration, 1, memory_order_relaxed);
     if (!self.available) { _lastError = @"This macOS release does not expose the required virtual display APIs."; return 0; }
+    BOOL portrait = orientation == BXDisplayOrientationPortrait;
     @autoreleasepool {
     @try {
         CGVirtualDisplayDescriptor *descriptor = [[NSClassFromString(@"CGVirtualDisplayDescriptor") alloc] init];
         descriptor.name = @"BOOX Extended Desktop";
         descriptor.queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
-        descriptor.maxPixelsWide = 2480;
-        descriptor.maxPixelsHigh = 1860;
-        descriptor.sizeInMillimeters = CGSizeMake(210, 157.5);
+        descriptor.maxPixelsWide = portrait ? 1860 : 2480;
+        descriptor.maxPixelsHigh = portrait ? 2480 : 1860;
+        descriptor.sizeInMillimeters = portrait ? CGSizeMake(157.5, 210) : CGSizeMake(210, 157.5);
         descriptor.vendorID = 0xB00;
         descriptor.productID = 0x4A1C;
         // A new session identifier avoids macOS restoring a stale mirrored layout.
@@ -115,7 +116,7 @@ static void DisplayConfigurationChanged(CGDirectDisplayID display, CGDisplayChan
         if (!display) { _lastError = @"macOS refused to create the virtual display."; return 0; }
         CGVirtualDisplaySettings *settings = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
         settings.hiDPI = 1;
-        CGVirtualDisplayMode *mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc] initWithWidth:1240 height:930 refreshRate:60.0];
+        CGVirtualDisplayMode *mode = [[NSClassFromString(@"CGVirtualDisplayMode") alloc] initWithWidth:(portrait ? 930 : 1240) height:(portrait ? 1240 : 930) refreshRate:60.0];
         if (!mode) { _lastError = @"macOS refused the BOOX display mode."; return 0; }
         settings.modes = @[mode];
         if (![display applySettings:settings]) { _lastError = @"macOS could not apply the BOOX display mode."; return 0; }

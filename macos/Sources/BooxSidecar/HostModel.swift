@@ -40,6 +40,7 @@ struct DisplayInfo: Identifiable {
     @Published var wirelessStarting = false
     @Published var displayAsleep = false
     @Published var displayPosition = "right"
+    @Published var displayOrientation = "landscape"
     private struct ResumeTarget {
         let displayID: CGDirectDisplayID
         let extended: Bool
@@ -126,6 +127,7 @@ struct DisplayInfo: Identifiable {
             if prefs.object(forKey: "capture.grayscale") != nil { grayscale = prefs.bool(forKey: "capture.grayscale") }
             if let value = prefs.object(forKey: "capture.jpegQuality") as? Double, (0.4...0.95).contains(value) { jpegQuality = value }
             if let value = prefs.string(forKey: "display.position"), ["left", "right"].contains(value) { displayPosition = value }
+            if let value = prefs.string(forKey: "display.orientation"), ["landscape", "portrait"].contains(value) { displayOrientation = value }
         }
         refreshDisplays()
         virtualDisplay.onConfigurationChanged = { [weak self] in
@@ -262,7 +264,7 @@ struct DisplayInfo: Identifiable {
                 stopCapture(); releaseVirtualDisplay(); refreshDisplays()
             }
         }
-        let id = virtualDisplay.createExtendedDisplay()
+        let id = virtualDisplay.createExtendedDisplay(orientation: displayOrientation == "portrait" ? .portrait : .landscape)
         guard id != 0 else { message = virtualDisplay.lastError ?? "Virtual display creation failed."; return }
         virtualDisplayID = id
         // WindowServer and ScreenCaptureKit discover new displays asynchronously.
@@ -654,6 +656,24 @@ struct DisplayInfo: Identifiable {
         message = "BOOX desktop position set to the \(side)."
     }
 
+    func setOrientation(_ orientation: String) {
+        guard (orientation == "landscape" || orientation == "portrait"), orientation != displayOrientation, !creatingExtendedDisplay else { return }
+        displayOrientation = orientation
+        if !browserEnabled { UserDefaults.standard.set(orientation, forKey: "display.orientation") }
+        // Orientation changes the display mode, so the virtual display must be
+        // recreated. If it does not exist (or the display is asleep), the saved
+        // preference is applied the next time it is created.
+        guard virtualDisplayID != 0, !displayAsleep else {
+            message = "BOOX display orientation set to \(orientation)."
+            return
+        }
+        stopCapture()
+        releaseVirtualDisplay()
+        refreshDisplays()
+        message = "Recreating the BOOX desktop in \(orientation)…"
+        Task { await prepareExtendedDisplay(requestPermission: permission) }
+    }
+
     func pairBOOX(useWiFi: Bool) {
         guard !browserEnabled, !pairingDevice, !displayAsleep else { return }
         let host: String
@@ -806,7 +826,7 @@ struct DisplayInfo: Identifiable {
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "message": message]
+        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "orientation": displayOrientation, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
