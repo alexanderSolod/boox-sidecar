@@ -1,8 +1,10 @@
 # BOOX Sidecar implementation plan
 
-Target: BOOX Note Air4 C and this Apple Silicon MacBook. Updated 2026-10-28.
+Historical target: BOOX Note Air4 C and an Apple Silicon MacBook. Recorded 2026-10-28.
 
-## v0.3 delta (implemented 2026-10-28)
+This records the v0.2 and v0.3 release designs and their original validation gates, not current source behavior. Current source uses protocol 2, pinned TLS for both native routes, persistent pairing, and an isolated development-only browser; see [PROTOCOL.md](PROTOCOL.md) and the [README](../README.md). Historical test counts and device results below do not establish acceptance for later builds.
+
+## Historical v0.3 delta (implemented 2026-10-28)
 
 One **Connect** action replaces the manual setup sequence: it prepares the extended desktop, starts capture, enables encrypted Wi-Fi, establishes the ADB reverse tunnel, provisions attached BOOX devices and keeps a USB watcher for reconnects. Pairing now persists in a private `~/Library/Application Support/BOOX Sidecar` credential (0600 file in a 0700 directory), so a Mac restart keeps the pairing and **Forget pairing** rotates it. The Mac advertises `_boox-sidecar._tcp.` with a public `host_id`; the Android Auto route tries USB first, then discovered/saved pinned Wi-Fi, probing USB while on Wi-Fi. Picture presets (Speed / Balanced / Sharp text) set width, color and JPEG quality at 60 requested FPS. Wire protocol stays at 1 with added `host_id`/status fields; see [PROTOCOL.md](PROTOCOL.md). Hardware acceptance for this delta is tracked in [HARDWARE-TEST.md](HARDWARE-TEST.md).
 

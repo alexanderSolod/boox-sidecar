@@ -2,7 +2,7 @@
 
 Updated 2026-10-28. Record Mac version, BOOX firmware, app build, connection type/network and test date with each result. Compilation, a created virtual display and synthetic frames do not establish native end-to-end streaming or physical panel performance.
 
-Current device: NoteAir4C, Android 13; installed native app **v0.3 / version code 3** on 2026-10-28. The sections below marked v0.2 are the earlier verified baseline; the v0.3 checklist tracks the new one-Connect, remembered-pairing and auto-route flow.
+Historical device record: NoteAir4C, Android 13; installed native app **v0.3 / version code 3** on 2026-10-28. The sections below marked v0.2 are the earlier verified baseline; the v0.3 checklist tracks that release's one-Connect, remembered-pairing and auto-route flow. These checkmarks do not establish current protocol-2 acceptance. Identify the connected model, firmware, commit, and protocol for each new run; version code 3 alone does not distinguish current source from the historical release.
 
 ## v0.3 acceptance (2026-10-28)
 

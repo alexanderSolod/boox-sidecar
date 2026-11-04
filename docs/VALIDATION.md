@@ -1,8 +1,8 @@
 # BOOX Sidecar validation — 2026-10-28
 
-Environment: Apple Silicon Mac, macOS 26.6.2, Swift 6.3.3 Command Line Tools. Mac minimum: 14 for USB, 15 for encrypted Wi-Fi. Actual tablet: BOOX NoteAir4C running Android 13.
+Historical environment: Apple Silicon Mac, macOS 26.6.2, Swift 6.3.3 Command Line Tools. Those releases required macOS 14 for USB, 15 for encrypted Wi-Fi. Tablet recorded for those runs: BOOX NoteAir4C running Android 13. Current protocol-2 source requires macOS 15+ for both native routes; the results and test counts below are historical, not current-build acceptance.
 
-## Current v0.3 evidence (2026-10-28)
+## Historical v0.3 evidence (2026-10-28)
 
 - `./scripts/build-mac.sh` builds and ad-hoc signs the v0.3.0 Mac bundle; `codesign --verify --deep --strict` passes inside the script.
 - `sh android/build.sh` compiles the v0.3.0 / versionCode 3 APK; `./scripts/install-native.sh` installed it on the actual NoteAir4C, and `am start` displays `MainActivity` (logcat: `Native receiver ready`, `BOOX refresh mode ready=true`).
@@ -12,7 +12,7 @@ Environment: Apple Silicon Mac, macOS 26.6.2, Swift 6.3.3 Command Line Tools. Ma
 - Live capture remains gated by Screen Recording consent: after the v0.3 rebuild the running app reported `ScreenCaptureKit failed (-3801): The user declined TCCs` with `capturing=false`. The stale grant was reset with `tccutil reset ScreenCapture local.boox.sidecar`; approval plus a Connect retry, real frames, the Wi-Fi auto-route and sustained-FPS measurements remain the pending hardware gate.
 - Earlier records below describe v0.2; only statements re-verified above apply to v0.3.
 
-## Current v0.2 evidence
+## Historical v0.2 evidence
 
 - The packaged Mac app builds with the isolated Objective-C virtual-display backend and native TLS support. Its experimental virtual-display creation succeeds: 1240 × 930 logical, 2480 × 1860 native HiDPI, arranged to the right, nonmirrored. The final host also captures that virtual display, and the installed native receiver logged its first 1240 × 930 Canvas draw over Wi-Fi; details follow.
 - Native Android APK compilation and lint pass with the project-local JDK 17 / Gradle 8.9 / Android SDK 35 toolchain. Native version 0.2 / version code 2 was installed successfully on the actual Android 13 NoteAir4C.
