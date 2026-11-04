@@ -132,13 +132,26 @@ final class InputDispatcher {
         enqueue(owner, captureSession, type, first, second, clickCount, scrollX, scrollY, null, null);
     }
 
-    private synchronized void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount, Double scrollX, Double scrollY, String dragPhase, String dragId) {
-        if (!matches(owner, captureSession) || !Double.isFinite(first) || !Double.isFinite(second)) return;
+    private record Pause(long epoch, String reason) {}
+
+    private void enqueue(Object owner, String captureSession, String type, double first, double second, int clickCount, Double scrollX, Double scrollY, String dragPhase, String dragId) {
+        Pause paused;
+        boolean schedule;
+        synchronized (this) {
+            paused = enqueueLocked(owner, captureSession, type, first, second, clickCount, scrollX, scrollY, dragPhase, dragId);
+            schedule = sender != null && !queue.isEmpty() && !draining;
+            if (schedule) draining = true;
+        }
+        notifyPaused(paused);
+        if (schedule) executor.execute(this::drain);
+    }
+
+    private Pause enqueueLocked(Object owner, String captureSession, String type, double first, double second, int clickCount, Double scrollX, Double scrollY, String dragPhase, String dragId) {
+        if (!matches(owner, captureSession) || !Double.isFinite(first) || !Double.isFinite(second)) return null;
         boolean scroll = "scroll".equals(type);
         long now = clock.getAsLong();
         if (!queue.isEmpty() && now - queue.peekFirst().createdAt >= MAX_AGE_MILLIS) {
-            pause("Input waited too long.");
-            return;
+            return pauseLocked("Input waited too long.");
         }
         Event tail = queue.peekLast();
         if ("move".equals(dragPhase) && tail != null && "move".equals(tail.dragPhase) && dragId.equals(tail.dragId)) {
@@ -147,17 +160,14 @@ final class InputDispatcher {
         } else if (scroll && tail != null && tail.scroll && Math.signum(tail.first) == Math.signum(first)
                 && java.util.Objects.equals(tail.scrollX, scrollX) && java.util.Objects.equals(tail.scrollY, scrollY)) {
             double accumulated = tail.first + first;
-            if (!Double.isFinite(accumulated)) { pause("Too much input is waiting."); return; }
+            if (!Double.isFinite(accumulated)) { return pauseLocked("Too much input is waiting."); }
             queue.removeLast();
             queue.addLast(tail.scrollDelta(accumulated));
         } else {
-            if (queue.size() >= CAPACITY) { pause("Too much input is waiting."); return; }
+            if (queue.size() >= CAPACITY) { return pauseLocked("Too much input is waiting."); }
             queue.addLast(new Event(type, first, second, now, clickCount, scrollX, scrollY, dragPhase, dragId));
         }
-        if (!draining) {
-            draining = true;
-            executor.execute(this::drain);
-        }
+        return null;
     }
 
     private void drain() {
@@ -166,16 +176,16 @@ final class InputDispatcher {
             Sender target;
             String capture;
             long current;
+            Pause paused = null;
             synchronized (this) {
                 current = epoch;
                 if (sender == null) { draining = false; return; }
                 event = queue.pollFirst();
                 if (event == null) { draining = false; return; }
                 if (clock.getAsLong() - event.createdAt >= MAX_AGE_MILLIS) {
-                    pause("Input waited too long.");
-                    continue;
+                    paused = pauseLocked("Input waited too long.");
                 }
-                if (event.scroll && Math.abs(event.first) > 1000) {
+                if (paused == null && event.scroll && Math.abs(event.first) > 1000) {
                     double delta = Math.copySign(1000, event.first);
                     queue.addFirst(event.scrollDelta(event.first - delta));
                     event = event.scrollDelta(delta);
@@ -183,17 +193,23 @@ final class InputDispatcher {
                 target = sender;
                 capture = captureSession;
             }
+            if (paused != null) { notifyPaused(paused); continue; }
             try { target.send(event, capture); }
             catch (Exception exception) {
                 synchronized (this) {
-                    if (current == epoch) pause("Input delivery could not be confirmed.");
+                    if (current == epoch) paused = pauseLocked("Input delivery could not be confirmed.");
                 }
+                notifyPaused(paused);
             }
         }
     }
 
-    private void pause(String reason) {
+    private Pause pauseLocked(String reason) {
         stop();
-        listener.paused(epoch, reason);
+        return new Pause(epoch, reason);
+    }
+
+    private void notifyPaused(Pause paused) {
+        if (paused != null && isCurrent(paused.epoch())) listener.paused(paused.epoch(), paused.reason());
     }
 }

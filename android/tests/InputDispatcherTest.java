@@ -12,6 +12,7 @@ public final class InputDispatcherTest {
         orderedInput();
         boundsAndFailure();
         obsoleteOwnership();
+        inlineExecutorPause();
         anchoredScrollAndDrag();
         System.out.println(checks + " ordered input checks passed.");
     }
@@ -111,6 +112,21 @@ public final class InputDispatcherTest {
         aged.executor.run();
         check(aged.sender.events.isEmpty() && aged.pauses.size() == 1);
 
+        Fixture enqueueAged = new Fixture();
+        enqueueAged.dispatcher.tap(enqueueAged.owner, "capture", 0.1, 0.2);
+        enqueueAged.now[0] = InputDispatcher.MAX_AGE_MILLIS;
+        enqueueAged.dispatcher.tap(enqueueAged.owner, "capture", 0.3, 0.4);
+        check(enqueueAged.pauses.size() == 1 && enqueueAged.sender.cancelled);
+        enqueueAged.executor.run();
+        check(enqueueAged.sender.events.isEmpty());
+
+        Fixture overflow = new Fixture();
+        overflow.dispatcher.scroll(overflow.owner, "capture", Double.MAX_VALUE);
+        overflow.dispatcher.scroll(overflow.owner, "capture", Double.MAX_VALUE);
+        check(overflow.pauses.size() == 1 && overflow.sender.cancelled);
+        overflow.executor.run();
+        check(overflow.sender.events.isEmpty());
+
         Fixture failed = new Fixture();
         failed.sender.fail = true;
         failed.dispatcher.tap(failed.owner, "capture", 0.1, 0.2);
@@ -158,14 +174,42 @@ public final class InputDispatcherTest {
         check(latest.events.size() == 1 && churn.pauses.isEmpty());
     }
 
+    private static void inlineExecutorPause() {
+        InputDispatcher[] dispatcher = new InputDispatcher[1];
+        List<Long> epochs = new ArrayList<>();
+        Object owner = new Object();
+        Sender failed = new Sender();
+        failed.fail = true;
+        dispatcher[0] = new InputDispatcher(Runnable::run, () -> 0, (epoch, reason) -> {
+            check(!Thread.holdsLock(dispatcher[0]));
+            check(dispatcher[0].isCurrent(epoch));
+            check(!dispatcher[0].matches(owner, "capture") && failed.cancelled);
+            epochs.add(epoch);
+        });
+        dispatcher[0].activate(owner, "capture", failed);
+        dispatcher[0].tap(owner, "capture", 0.1, 0.2);
+        check(epochs.size() == 1 && failed.events.size() == 1);
+        Sender replacement = new Sender();
+        dispatcher[0].activate(owner, "next", replacement);
+        check(!dispatcher[0].isCurrent(epochs.get(0)));
+        dispatcher[0].tap(owner, "next", 0.3, 0.4);
+        check(replacement.events.size() == 1 && epochs.size() == 1);
+    }
+
     private static final class Fixture {
         final TestExecutor executor = new TestExecutor();
         final long[] now = {0};
         final Object owner = new Object();
         final Sender sender = new Sender();
         final List<String> pauses = new ArrayList<>();
-        final InputDispatcher dispatcher = new InputDispatcher(executor, () -> now[0], (epoch, reason) -> pauses.add(reason));
+        final InputDispatcher dispatcher = new InputDispatcher(executor, () -> now[0], this::paused);
         Fixture() { dispatcher.activate(owner, "capture", sender); }
+        private void paused(long epoch, String reason) {
+            check(!Thread.holdsLock(dispatcher));
+            check(dispatcher.isCurrent(epoch));
+            check(sender.cancelled && !dispatcher.matches(owner, "capture"));
+            pauses.add(reason);
+        }
     }
 
     private static class Sender implements InputDispatcher.Sender {
