@@ -30,7 +30,8 @@ def pairing():
 
 def launch(component, token='a' * 64):
     adb('shell', 'pm', 'enable', TARGET)
-    result = adb('shell', 'am', 'start', '-W', '-n', TARGET + '/local.boox.sidecar.' + component,
+    command = ['broadcast', '-f', '32'] if component == 'ProvisioningReceiver' else ['start', '-W']
+    result = adb('shell', 'am', *command, '-n', TARGET + '/local.boox.sidecar.' + component,
                 '--ei', 'pairing_version', '2', '--es', 'host', 'https://127.0.0.1:9',
                 '--es', 'usb_host', 'https://127.0.0.1:9', '--es', 'token', token,
                 '--es', 'spki_sha256', 'b' * 64, '--es', 'host_id', 'c' * 64)
@@ -67,11 +68,11 @@ def main():
         launch('MainActivity', 'd' * 64)
         time.sleep(.5)
         assert not pairing(), 'Public launcher accepted pairing extras'
-        launch('ProvisioningActivity')
+        launch('ProvisioningReceiver')
         wait_for(lambda: pairing().get('token') == 'a' * 64)
         saved = pairing()
         assert saved['spkiPin'] == 'b' * 64 and saved['hostId'] == 'c' * 64
-        launch('ProvisioningActivity', 'invalid')
+        launch('ProvisioningReceiver', 'invalid')
         time.sleep(.5)
         assert pairing() == saved, 'Invalid provisioning changed pairing'
         launch('MainActivity', 'd' * 64)
