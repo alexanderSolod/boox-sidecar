@@ -339,7 +339,7 @@ public final class MainActivity extends Activity {
         if (!route.endpoint.equals(pairing.usb)) preferences.edit().putString("wifiHost", route.endpoint).apply();
         Log.i("BooxSidecar", "Authenticated route connected: " + (pairing.usb.equals(route.endpoint) ? "USB" : "pinned Wi-Fi"));
         setCaptureState(session, route.client, route.status.optBoolean("permission") && route.status.optBoolean("capturing"),
-                route.status.optString("capture_session", ""), route.status.optBoolean("displayAsleep", false));
+                route.status.optString("capture_session", ""), route.status.optBoolean("displayAsleep", false), route.status.optBoolean("inputEnabled", false));
         adoptHostSettings(session, route.client, route.status);
         worker.execute(() -> poll(session, pairing, route.client, route.endpoint));
     }
@@ -432,7 +432,7 @@ public final class MainActivity extends Activity {
                     : new PinnedClient.Response(new byte[0], -1);
             if (response.bytes.length != 0 && isCurrent(session)) {
                 if (!sessions.acceptsCapture(response.captureSession)) {
-                    setCaptureState(session, connection, false, "", sessions.hostAsleep());
+                    setCaptureState(session, connection, false, "", sessions.hostAsleep(), false);
                     nextStatusAt = 0;
                     if (isCurrent(session) && sessions.owns(session, connection)) worker.schedule(() -> poll(session, pairing, connection, endpoint), 1, TimeUnit.MILLISECONDS);
                     return;

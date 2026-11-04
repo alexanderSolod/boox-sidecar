@@ -61,8 +61,11 @@ public final class SessionCoordinatorTest {
         Object usb = new Object(), wifi = new Object();
         check(sessions.activate(session, usb));
         check(sessions.updateCapture(session, usb, true, "before-sleep", false));
+        sessions.updateInputPermission(session, usb, true);
+        check(sessions.inputAllowed());
         check(sessions.updateCapture(session, usb, true, "before-sleep", true));
         check(sessions.hostAsleep() && !sessions.captureReady());
+        check(!sessions.inputAllowed());
         check(!sessions.acceptsCapture("before-sleep"));
         check(sessions.failed(session, usb));
         check(sessions.hostAsleep());
@@ -72,6 +75,9 @@ public final class SessionCoordinatorTest {
         check(!sessions.updateCapture(session, wifi, false, "", true));
         check(sessions.updateCapture(session, wifi, true, "after-wake", false));
         check(!sessions.hostAsleep() && sessions.acceptsCapture("after-wake"));
+        check(!sessions.inputAllowed());
+        sessions.updateInputPermission(session, wifi, true);
+        check(sessions.inputAllowed());
         check(!sessions.acceptsCapture("before-sleep"));
         check(!sessions.updateCapture(session, usb, false, "", true));
         check(!sessions.hostAsleep() && sessions.acceptsCapture("after-wake"));

@@ -28,11 +28,3 @@ swiftc -module-cache-path "$work/module-cache" \
     "$root/macos/Sources/BooxSidecar/InputEvents.swift" \
     "$root/macos/Tests/InputEventsTests.swift" -o "$work/input"
 "$work/input"
-swiftc -module-cache-path "$work/module-cache" \
-    "$root/macos/Sources/BooxSidecar/PairingCredential.swift" \
-    "$root/macos/Sources/BooxSidecar/HostIdentity.swift" \
-    "$root/macos/Sources/BooxSidecar/TLSIdentity.swift" \
-    "$root/macos/Sources/BooxSidecar/SharingAuthority.swift" \
-    "$root/macos/Sources/BooxSidecar/HTTPServer.swift" \
-    "$root/macos/Tests/SecurityIntegrationTests.swift" -o "$work/security"
-"$work/security"

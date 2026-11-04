@@ -10,7 +10,7 @@ For released binaries, see [installation instructions](docs/INSTALL.md).
 2. On first setup, connect the BOOX by USB, enable USB debugging and authorize this Mac.
 3. Install the Android app: `./scripts/install-native.sh`.
 4. Click **Connect** on the Mac. It creates the BOOX desktop, starts capture, enables encrypted Wi-Fi when available unless explicitly disabled, establishes the USB tunnel and provisions the installed native app.
-5. Move windows onto the BOOX desktop using your Mac's display arrangement. Its logical size is 1240 × 930, backed by a 2480 × 1860 HiDPI display. The app remembers its position. Use **Left/Right** to choose a new side; if needed, placement moves outside the other displays to avoid overlap.
+5. Move windows onto the BOOX desktop using your Mac's display arrangement. Its logical size is 1240 × 930 (or 620 × 827 in Portrait, which renders interface elements larger for readability), backed by a HiDPI display. The app remembers its position. Use **Left/Right** to choose a new side; if needed, placement moves outside the other displays to avoid overlap. The **Orientation** toggle recreates the desktop in landscape or portrait — rotate the tablet to match.
 6. Later, open both apps and click **Connect**. The Android app remembers this Mac. **Auto** prefers USB, falls back to the saved pinned Wi-Fi route, and returns to USB when available. Wi-Fi needs both devices on a reachable network; USB works without Wi-Fi.
 
 Protocol 2 requires updating both apps and pairing again over USB. Pairing survives normal restarts. Both USB and Wi-Fi require TLS and the saved public-key pin; discovery can locate a remembered Mac but cannot pair an unknown Mac.
@@ -75,7 +75,7 @@ Requires the build tools above, Node.js 22+, and Python 3. Use `--suite browser|
 The [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), and [implementation plan](docs/PLAN.md) record the v0.3 release.
 
 - Native virtual-display creation uses undocumented CoreGraphics interfaces isolated in an Objective-C target. It is experimental and may break with a macOS update. References/licenses are in [THIRD_PARTY_NOTICES.md](macos/THIRD_PARTY_NOTICES.md).
-- Portrait desktop presets, pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
+- Pressure-sensitive pen, palm rejection, audio, clipboard and keyboard forwarding remain future work.
 - Wi-Fi requires a route between tablet and Mac; guest/client-isolated networks can prevent it.
 - The host keeps one latest JPEG and clients bound their work. Static screens may produce fewer frames than the requested rate.
 - The normal USB TLS listener binds only to loopback on 8787. Wi-Fi uses a separate TLS listener on 8788. Both use SHA-256 public-key/SPKI pinning and bearer authentication. No cloud relay, external viewer assets, telemetry, or system-wide TLS bypass.
