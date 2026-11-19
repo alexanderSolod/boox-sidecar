@@ -28,7 +28,7 @@ Browser resources are available only with `--development-browser` or synthetic `
 
 ## HTTP contract
 
-Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is public. Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. Loopback listeners validate Host headers, including native USB TLS. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
+Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is public. Authenticated API traffic doubles as client liveness: after about 120 seconds without contact while sharing is requested, the Mac disconnects (stops capture and removes the virtual display) while retaining pairing. The watchdog arms only after a client has first contacted the host, and it does not run while the Mac display is asleep. Responses use `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, without permissive CORS. Cross-origin state-changing requests are rejected. Loopback listeners validate Host headers, including native USB TLS. Requests are bounded to 64 KiB. Only `index.html`, `app.js`, and `style.css` are served as viewer resources; no directory traversal or arbitrary file serving.
 
 | Endpoint | Response / behavior |
 | --- | --- |

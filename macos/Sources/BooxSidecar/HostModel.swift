@@ -74,6 +74,9 @@ struct DisplayInfo: Identifiable {
     private var generation = 0
     private let sharingAuthority = SharingAuthority()
     private var captureSession = ""
+    private var lastClientActivity: Date?
+    private var clientWatchdogTimer: Timer?
+    private static let clientTimeoutSeconds: TimeInterval = 120
     private var dragState = InputEvents.DragState()
     private var dragLeaseTimer: Timer?
     private var frame: CapturedFrame?
@@ -175,11 +178,15 @@ struct DisplayInfo: Identifiable {
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { _ = self?.releaseDrag() }
         }
+        clientWatchdogTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkClientActivity() }
+        }
     }
 
     deinit {
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+        clientWatchdogTimer?.invalidate()
     }
 
     private func displayDidSleep() {
@@ -571,11 +578,20 @@ struct DisplayInfo: Identifiable {
     }
 
     func disconnect() {
+        lastClientActivity = nil
         stop()
         usbProvisioning = USBProvisioningState()
         enableWireless(false)
         if !creatingExtendedDisplay { removeExtendedDisplay() }
         connectionMessage = "Disconnected. Pairing is remembered for next time."
+    }
+
+    private func checkClientActivity() {
+        guard let last = lastClientActivity, connectionRequested || capturing || starting,
+              !displayAsleep, Date().timeIntervalSince(last) > Self.clientTimeoutSeconds else { return }
+        disconnect()
+        connectionMessage = "The paired device stopped responding. Disconnected after \(Int(Self.clientTimeoutSeconds))s; pairing is remembered."
+        message = connectionMessage
     }
 
     private func checkUSB(explicit: Bool) async {
@@ -870,6 +886,7 @@ struct DisplayInfo: Identifiable {
         }
         if request.path.hasPrefix("/api/") {
             guard SharingAuthority.matchesCredential(header: request.headers["authorization"], token: token) else { return .error("Pairing token required", status: 401) }
+            lastClientActivity = Date()
         }
         if request.method != "GET" {
             if let origin = request.headers["origin"] {
