@@ -70,7 +70,7 @@ See [Android build and connection details](android/README.md). The Mac app uses 
 ./scripts/test.sh
 ```
 
-Requires the build tools above, Node.js 22+, and Python 3. Use `--suite browser|mac|android` for one platform or `--gui` for host smoke tests in an interactive macOS desktop session.
+Requires the build tools above, Node.js 22+, and Python 3. Use `--suite browser|mac|android` for one platform or `--gui` for host smoke tests in an interactive macOS desktop session. Use `--device` with an authorized Android device/emulator for component authorization tests (`ANDROID_SERIAL` selects a device); these install and remove separate test-only packages.
 
 The [validation results](docs/VALIDATION.md), [hardware checklist](docs/HARDWARE-TEST.md), and [implementation plan](docs/PLAN.md) record the v0.3 release.
 

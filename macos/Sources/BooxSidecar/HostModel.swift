@@ -55,6 +55,7 @@ struct DisplayInfo: Identifiable {
     private var usbWatcher: Task<Void, Never>?
     private var usbProvisioning = USBProvisioningState()
     private var connectionGeneration = 0
+    private var terminationObserver: NSObjectProtocol?
     private var wirelessGeneration = 0
     private(set) var hostID = ""
     private var tlsIdentity: TLSIdentity?
@@ -73,6 +74,8 @@ struct DisplayInfo: Identifiable {
     private var generation = 0
     private let sharingAuthority = SharingAuthority()
     private var captureSession = ""
+    private var dragState = InputEvents.DragState()
+    private var dragLeaseTimer: Timer?
     private var frame: CapturedFrame?
     private var demoTimer: Timer?
     var viewerURL: String { "http://127.0.0.1:\(port)/#token=\(token)" }
@@ -138,7 +141,11 @@ struct DisplayInfo: Identifiable {
             Task { @MainActor in reply(self?.handle(request) ?? .error("Host unavailable", status: 503)) }
         }
         server.onReady = { [weak self] in Task { @MainActor in self?.serverReady = true } }
-        server.onError = { [weak self] text in Task { @MainActor in self?.message = "Server: \(text)"; self?.serverReady = false } }
+        server.onError = { [weak self] text in Task { @MainActor in
+            self?.releaseDrag()
+            self?.message = "Server: \(text)"
+            self?.serverReady = false
+        } }
         do {
             if !token.isEmpty { try startLocalServer() }
             // CLI output is intentionally a local pairing credential; never transmitted to a third party.
@@ -165,9 +172,15 @@ struct DisplayInfo: Identifiable {
                 Task { @MainActor in self?.displayDidWake() }
             })
         }
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.releaseDrag() }
+        }
     }
 
-    deinit { workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) } }
+    deinit {
+        workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+    }
 
     private func displayDidSleep() {
         guard !displayAsleep else { return }
@@ -359,6 +372,7 @@ struct DisplayInfo: Identifiable {
             tlsIdentity = refreshed
             fingerprint = refreshed.spkiPin
             if changed || !serverReady {
+                releaseDrag()
                 server.stop()
                 serverReady = false
                 try startLocalServer()
@@ -389,6 +403,7 @@ struct DisplayInfo: Identifiable {
     func enableWireless(_ enabled: Bool) {
         guard !browserEnabled, configurationError == nil else { return }
         if !enabled {
+            releaseDrag()
             wirelessGeneration += 1
             advertiser.stop()
             wirelessServer.stop()
@@ -418,6 +433,7 @@ struct DisplayInfo: Identifiable {
             } }
             wirelessServer.onError = { [weak self] text in Task { @MainActor in
                 guard let self, self.wirelessGeneration == attempt else { return }
+                self.releaseDrag()
                 self.wirelessStarting = false
                 self.wirelessEnabled = false
                 self.advertiser.stop()
@@ -777,6 +793,7 @@ struct DisplayInfo: Identifiable {
     }
 
     private func stopCapture() {
+        releaseDrag()
         sharingAuthority.invalidate()
         captureSession = ""
         server.cancelSensitiveConnections()
@@ -819,14 +836,18 @@ struct DisplayInfo: Identifiable {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             inputEnabled = AXIsProcessTrustedWithOptions(options)
             if !inputEnabled { message = "Allow Accessibility in System Settings, then enable remote input again." }
+            else if message == "Allow Accessibility in System Settings, then enable remote input again." { message = "" }
         } else { inputEnabled = false }
+        if !inputEnabled { releaseDrag() }
     }
 
     func copyLink() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(viewerURL, forType: .string) }
     func copyToken() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(token, forType: .string) }
 
     private func status() -> [String: Any] {
-        ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": inputEnabled && AXIsProcessTrusted(), "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "orientation": displayOrientation, "message": message]
+        let allowed = inputEnabled && AXIsProcessTrusted()
+        if !allowed { releaseDrag() }
+        return ["protocol": 2, "capture_session": captureSession, "capturing": capturing, "permission": demo || permission, "demo": demo, "inputEnabled": allowed, "frameID": frameID, "width": frame?.width ?? 0, "height": frame?.height ?? 0, "fps": fps, "maxWidth": maxWidth, "jpegQuality": jpegQuality, "jpegBytes": frame?.jpeg.count ?? 0, "encodeMilliseconds": frame?.encodingMilliseconds ?? 0, "grayscale": grayscale, "displayID": displayID, "virtualDisplayID": virtualDisplayID, "extendedDesktop": displayID == virtualDisplayID && virtualDisplayID != 0, "wirelessEnabled": wirelessEnabled, "wirelessAddresses": wirelessAddresses, "spki_sha256": fingerprint, "host_id": hostID, "displayAsleep": displayAsleep, "position": displayPosition, "orientation": displayOrientation, "message": message]
     }
 
     private func handle(_ request: HTTPRequest) -> HTTPResponse {
@@ -839,6 +860,7 @@ struct DisplayInfo: Identifiable {
 
     private func respond(to request: HTTPRequest) -> HTTPResponse {
         if !browserEnabled && tlsIdentity?.valid(at: Date()) != true {
+            releaseDrag()
             return .error("TLS identity expired; renew it on the Mac", status: 503)
         }
         // Prevent DNS rebinding in default loopback mode.
@@ -924,24 +946,85 @@ struct DisplayInfo: Identifiable {
         guard !captureSession.isEmpty, object["capture_session"] as? String == captureSession else {
             return .error("Input belongs to an inactive capture session", status: 403)
         }
-        guard let captureDisplayID, CGDisplayIsActive(captureDisplayID) != 0, inputEnabled, AXIsProcessTrusted(), capturing, !demo else { return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403) }
+        guard let captureDisplayID, CGDisplayIsActive(captureDisplayID) != 0, inputEnabled, AXIsProcessTrusted(), capturing, !demo else {
+            releaseDrag()
+            return .error("Enable input locally on the Mac while sharing; Accessibility permission is required", status: 403)
+        }
         guard let type = object["type"] as? String else { return .error("Input type required", status: 400) }
-        if type == "tap" {
-            guard let x = number(object["x"]), let y = number(object["y"]), (0...1).contains(x), (0...1).contains(y) else { return .error("Coordinates must be from 0 to 1", status: 400) }
-            let bounds = CGDisplayBounds(captureDisplayID)
-            let point = CGPoint(x: bounds.minX + x * max(0, bounds.width - 1), y: bounds.minY + y * max(0, bounds.height - 1))
-            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-            CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        let bounds = CGDisplayBounds(captureDisplayID)
+        if type == "tap" || type == "rightClick" {
+            guard let normalized = InputEvents.normalizedPoint(object) else { return .error("Coordinates must be from 0 to 1", status: 400) }
+            guard let count = InputEvents.clickCount(object["clickCount"]) else { return .error("clickCount must be 1 or 2", status: 400) }
+            guard type != "rightClick" || object["clickCount"] == nil else { return .error("rightClick does not accept clickCount", status: 400) }
+            let point = InputEvents.displayPoint(normalized, bounds: bounds)
+            guard let events = InputEvents.click(at: point, count: count, button: type == "rightClick" ? .right : .left) else { return .error("Cannot create mouse events", status: 500) }
+            guard releaseDrag() else { return .error("Cannot release the previous drag", status: 500) }
+            for event in events { event.post(tap: .cghidEventTap) }
         } else if type == "scroll" {
             guard let delta = number(object["deltaY"]), (-1000...1000).contains(delta) else { return .error("deltaY must be from -1000 to 1000", status: 400) }
-            let bounds = CGDisplayBounds(captureDisplayID)
-            if let cursor = CGEvent(source: nil)?.location, !bounds.contains(cursor) {
-                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: bounds.midX, y: bounds.midY), mouseButton: .left)?.post(tap: .cghidEventTap)
+            var point: CGPoint?
+            if object["x"] != nil || object["y"] != nil {
+                guard let normalized = InputEvents.normalizedPoint(object) else { return .error("Scroll x and y must both be coordinates from 0 to 1", status: 400) }
+                point = InputEvents.displayPoint(normalized, bounds: bounds)
+            } else if let cursor = CGEvent(source: nil)?.location, !bounds.contains(cursor) {
+                point = CGPoint(x: bounds.midX, y: bounds.midY)
             }
-            CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: Int32(delta), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
+            guard let events = InputEvents.scroll(delta: delta, at: point) else { return .error("Cannot create scroll events", status: 500) }
+            guard releaseDrag() else { return .error("Cannot release the previous drag", status: 500) }
+            for event in events { event.post(tap: .cghidEventTap) }
+        } else if type == "drag" {
+            guard let command = InputEvents.DragCommand(object) else { return .error("Drag requires a UUID drag_id, start/move/end/cancel phase, and coordinates from 0 to 1", status: 400) }
+            let now = ProcessInfo.processInfo.systemUptime
+            if let active = dragState.active, now >= active.deadline, !releaseDrag() {
+                return .error("Cannot release the expired drag", status: 500)
+            }
+            var next = dragState
+            do {
+                let actions = try next.apply(command, captureSession: captureSession, bounds: bounds, now: now)
+                guard let events = InputEvents.mouse(actions) else { return .error("Cannot create drag events", status: 500) }
+                dragState = next
+                for event in events { event.post(tap: .cghidEventTap) }
+                scheduleDragLease()
+            } catch {
+                return .error("Drag is inactive or does not match the active gesture", status: 409)
+            }
         } else { return .error("Unsupported input type", status: 400) }
         return .json(["ok": true])
+    }
+
+    @discardableResult private func releaseDrag() -> Bool {
+        var next = dragState
+        let actions = next.release()
+        guard let events = InputEvents.mouse(actions) else {
+            scheduleDragLease()
+            return false
+        }
+        dragState = next
+        dragLeaseTimer?.invalidate()
+        dragLeaseTimer = nil
+        for event in events { event.post(tap: .cghidEventTap) }
+        return true
+    }
+
+    private func scheduleDragLease() {
+        dragLeaseTimer?.invalidate()
+        dragLeaseTimer = nil
+        guard let active = dragState.active else { return }
+        let delay = max(0.05, active.deadline - ProcessInfo.processInfo.systemUptime)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkDragLease() }
+        }
+        dragLeaseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func checkDragLease() {
+        guard let active = dragState.active else { return }
+        let authorized = captureSession == active.captureSession && capturing && inputEnabled && AXIsProcessTrusted()
+            && captureDisplayID.map { CGDisplayIsActive($0) != 0 } == true
+            && (browserEnabled || tlsIdentity?.valid(at: Date()) == true)
+        if !authorized || ProcessInfo.processInfo.systemUptime >= active.deadline { releaseDrag() }
+        else { scheduleDragLease() }
     }
 
     private func startDemo() {

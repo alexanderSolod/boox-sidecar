@@ -37,7 +37,7 @@ Every `/api/` request requires `Authorization: Bearer TOKEN`; `/health` is publi
 | `GET /api/displays` | `{"displays":[{"id":UInt32,"name":String,"width":Int,"height":Int}]}` |
 | `POST /api/settings` | Partial settings object; returns status |
 | `GET /api/frame?after=ID` | Latest JPEG newer than ID, or 204 if none; `after` is an integer >= -1 |
-| `POST /api/input` | Tap or scroll; returns `{"ok":true}` or error |
+| `POST /api/input` | Tap, right-click, drag or scroll; returns `{"ok":true}` or error |
 
 Status fields:
 
@@ -60,16 +60,20 @@ orientation: "landscape" | "portrait"
 
 Settings accept `fps` (integer 1–60), `grayscale` (Boolean), `maxWidth` (integer 600–2480), `jpegQuality` (number 0.4–0.95). Display selection is restricted to the local Mac UI. Any remote payload containing `displayID` is rejected with HTTP 403 before applying other fields. Unknown keys and invalid types/ranges are rejected. Changing capture settings restarts an active stream. Capture start/stop and virtual-display creation/removal remain local Mac actions; there is no remote capture-start endpoint.
 
-JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, `X-Frame-Height`, and `X-Capture-Session`. Status reports `capture_session` (empty while stopped); input requests must include the matching `capture_session`. Session changes invalidate pending frames and input. Stop, source loss, capture permission errors, and Forget pairing revoke queued sends and cancel sensitive connections. Already transmitted bytes cannot be retracted. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has one network/decode worker, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It retains the last frame while `displayAsleep` is true, and otherwise clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
+JPEG responses carry `X-Frame-ID`, `X-Frame-Width`, `X-Frame-Height`, and `X-Capture-Session`. Status reports `capture_session` (empty while stopped); input requests must include the matching `capture_session`. Session changes invalidate pending frames and input. Stop, source loss, capture permission errors, and Forget pairing revoke queued sends and cancel sensitive connections. Already transmitted bytes cannot be retracted. HTTP/1.1 connections support keep-alive. The native client reuses its TLS socket factory and hostname verifier across requests. The host retains only the latest JPEG. Clients preserve aspect ratio, bound requests and decoding, and discard obsolete results after settings/session changes. The native receiver has separate frame/decode and ordered input workers, one displayed bitmap and at most one pending bitmap; responses are capped at 64 KiB JSON / 12 MiB JPEG with additional decode bounds. It retains the last frame while `displayAsleep` is true, and otherwise clears frames on capture stop, missing permission or connection failure. The browser keeps one frame fetch/decode in flight.
 
 Input payloads:
 
 ```json
-{"type":"tap","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
-{"type":"scroll","deltaY":300,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"tap","x":0.5,"y":0.5,"clickCount":1,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"rightClick","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"scroll","x":0.5,"y":0.5,"deltaY":300,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
+{"type":"drag","phase":"start","drag_id":"6b1a96d7-3c16-4d1d-b025-c75aaf87d2ec","x":0.5,"y":0.5,"capture_session":"CURRENT_SESSION_FROM_STATUS"}
 ```
 
-Tap coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Scroll ranges from -1000 to 1000; positive means up. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.
+Tap and right-click coordinates range from 0 to 1 within the actual image, excluding letterboxes, and map to the selected display's Mac bounds. Optional `clickCount` on a tap is 1 (default) or 2 and describes one down/up pair; a double-click sends a count-1 tap followed by a count-2 tap at the same coordinates. Clients anchor the qualifying second tap to the first tap’s location. A stationary long press sends one `rightClick`, without a left click on release. Older hosts reject this distinct input type. Scroll ranges from -1000 to 1000; positive means up. Optional paired `x`/`y` coordinates target the scroll at that point. Touch clients use one finger to drag and two fingers to scroll. Clients send input in order independently of frame delivery, accumulate adjacent compatible scrolls, and split accumulated deltas at the per-request limit. Input queues allow 64 pending entries and a two-second maximum age; overload, expiry or uncertain delivery visibly pauses control without replaying requests. Clients follow the Mac's `inputEnabled` status without a second opt-in; a delivery fault requires an explicit Resume input action. The Mac requires local input opt-in, Accessibility permission and active non-demo capture. Invalid values are rejected; input denial returns 403.
+
+A drag uses a fresh UUID `drag_id` and ordered `start`, `move`, then `end` or `cancel` phases, each with normalized `x`/`y` coordinates and the current capture session. Only the matching active drag can move or end. Clients send a `move` heartbeat every 500 ms while holding. The Mac releases the mouse button after two seconds without an update, or when sharing/input is revoked or the app quits. Adjacent moves for the same drag may replace one another in the queue; start/end/cancel events remain ordered.
 
 Errors use `{"error":"human readable message"}`. Unknown paths return 404, wrong methods 405, missing/incorrect tokens 401. Clients handle missing permission/start, 204, reconnect, rotation and stale-session cancellation.
 

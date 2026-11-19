@@ -81,7 +81,7 @@ struct HostView: View {
                         Text("1240 px matches the panel's color resolution. Sharp text uses the full 2480 px black-and-white resolution. E-ink refresh speed depends on the BOOX refresh mode; capture FPS is not panel FPS.").font(.caption).foregroundStyle(.secondary)
                     }.padding(6).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Toggle("Allow BOOX taps and scrolling to control this Mac", isOn: Binding(get: { host.inputEnabled }, set: { host.enableInput($0) }))
+                Toggle("Allow BOOX to control this Mac", isOn: Binding(get: { host.inputEnabled }, set: { host.enableInput($0) }))
                 Text(host.message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 DisclosureGroup("Advanced controls", isExpanded: $advanced) {
                     VStack(alignment: .leading, spacing: 14) {

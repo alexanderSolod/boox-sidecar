@@ -28,6 +28,7 @@ input[type="checkbox"] { width: 21px; height: 21px; accent-color: #111; }
 #viewport.actual { display: block; }
 #viewport.actual #frame { max-width: none; max-height: none; margin: auto; }
 #viewport.controlling #frame { cursor: crosshair; }
+#viewport.controlling { touch-action: none; }
 #placeholder { padding: 28px; text-align: center; max-width: 540px; }
 #placeholder h2 { font-size: 23px; margin: 10px 0; font-weight: 500; }
 .screenMark { font-size: 64px; line-height: 1; }

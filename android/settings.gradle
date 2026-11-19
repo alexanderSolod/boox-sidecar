@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = 'BooxSidecar'
 include ':app'
+include ':provisioning-caller'
